@@ -1,0 +1,113 @@
+mod connection {
+    pub mod tcp;
+}
+mod tui;
+#[path ="./login-system.rs"]
+mod login_system;
+
+use clap::{ Command, Arg, ArgAction };
+
+fn main() {
+    // tui::tui_create();
+    let add_user = Command::new("database TUI interface")
+        .about("Create new database user")
+        .subcommand(
+            Command::new("adu")
+                    .about("Add new user to databse users list")
+                    .args([
+                        Arg::new("login")
+                            .long("login")
+                            .short('l')
+                            .action(ArgAction::Set)
+                            .long_help("login for new user. This value will be using as user \"login\"")
+                            .required(true),
+                        Arg::new("password")
+                            .long("password")
+                            .short('p')
+                            .action(ArgAction::Set)
+                            .long_help("password for new user. This value will be using as user \"password\"")
+                            .required(true),
+                        Arg::new("permission")
+                            .short('a')
+                            .action(ArgAction::Set)
+                            .long_help("Setup specific permision group for user")
+                            .required(false)
+                    ])
+        )
+        .subcommand(
+        Command::new("run")
+                    .about("Run database")
+                    .version("1.0")
+        )
+        .get_matches();
+
+    if let Some(cmd) = add_user.subcommand_matches("adu") {
+        if let Some(login) = cmd.get_one::<String>("login") {
+            if let Some(password) = cmd.get_one::<String>("password") {
+                if login.len() > 0 && password.len() >= 8 {
+                    let permision_grade: Option<&String> = cmd.get_one::<String>("permission");
+                    // println!("Correct user data added!")
+                    // Encrypt user data and save it into file with users datas
+                    if !login_system::create_user(login.clone(), password.clone(), permision_grade) {
+                        println!("From some reason couldn't create new user! Try again!");
+                    }
+                    else {
+                        println!("Created new user!");
+                    };
+                } 
+                else if password.len() < 8 {
+                    println!("In order to give appropriate security pitch you should enter password contained from more then 8 characters or from only 8 characters when you sure with less safeguards")
+                }
+                else {
+                    println!("Login must be created from at least one UTF-8 character");
+                }
+            };
+        }
+    }
+    else if let Some(_) = add_user.subcommand_matches("run") {
+        connection::tcp::handle_tcp("123");
+    }
+    else {
+        connection::tcp::handle_tcp("123");
+    }
+}
+
+// WARNING: To start robust testing you must turn on tcp server first
+#[cfg(test)]
+mod tests {
+    #[path = "../login-system.rs"]
+    mod login_module;
+
+    use std::{ net::TcpStream, io::{Write, Read} };
+    use login_module::authenticate_user;
+
+    #[test]
+    fn tcp_tester() {
+        let mut stream = TcpStream::connect("0.0.0.0:20050").expect("Couldn't connect with server");
+        let _on1 = stream.write("Siemanko".as_bytes()).unwrap();
+        // stream.shutdown(std::net::Shutdown::Both).unwrap();
+        let _on2 = stream.write("Siemanko 2".as_bytes()).expect("Caused on 2 try");
+        let rcnt: &mut [u8] = &mut [1];
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        stream.read(rcnt).unwrap();
+        // println!("{:?}", rcnt);
+    }
+
+    #[test]
+    fn tcp_register_cmd() {
+        let mut connection = TcpStream::connect("192.168.0.25:20050").expect("Couldn't connect with server");
+        connection.write_all("Register;login|x=x|jan 1-1 password|x=x|123".as_bytes()).unwrap();
+        
+        // Read response
+        // let rs = &mut [] as &mut [u8];
+        // connection.re(rs).unwrap();
+    }
+
+    #[test]
+    fn test_authenticate_user() {
+        let test_login = "tester".to_string();
+        let test_password = "1234567890".to_string();
+        println!("Authentication result: {}", authenticate_user(test_login, test_password));
+    }
+}
