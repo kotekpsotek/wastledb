@@ -7,6 +7,7 @@ use {
     std::io::{ BufReader, BufRead }
 };
 use login_system::authenticate_user;
+use crate::inter;
 
 // 
 enum ResponseTypes {
@@ -44,7 +45,7 @@ impl ResponseTypes {
         };
         match stream {
             Some(mut stri) => {
-                let resp = stri.write_all(result_message.as_bytes());
+                let resp = stri.write(result_message.as_bytes());
                 if let Err(_) = resp { // time when to user can't be send response because error is initialized durning creation of http server
                     couldnt_send_response();
                 }
@@ -153,26 +154,37 @@ impl CommandTypes {
     }
 }
 
-// Convert request to vector
-// "Call as 1"
-fn convert_request(mut stream: &TcpStream) -> Option<Vec<String>> {
-    let buf_reader = BufReader::new(&mut stream);
-    let tcp_request: Vec<String> = buf_reader
-        .lines()
-        .map(|result| {
-            match result {
-                Ok(data) => data,
-                Err(_) => String::new()
-            }
-        })
-        .take_while(|line| !line.is_empty())
-        .collect();
-    // return data forward
-    if tcp_request.len() == 0 {
-        return None
-    }
+// Call as 2
+// Handle pending request and return request message when it is correct
+// Err -> when: couldn't read request, colund't convert request to utf-8 string
+fn handle_request(stream: &mut TcpStream) -> Result<String, ()> {
+    // Recive Request
+    let mut req_buf = [0; inter::MAXIMUM_REQUEST_SIZE_BYTES];
+    match stream.read(&mut req_buf) {
+        Ok(_size) => {
+            // Create String from response
+            let mut intermediate_b = Vec::<u8>::new();
+            
+                //... add to "intermediate" bytes other then "0" 
+            for byte in req_buf {
+                if byte == 0 {
+                    break;
+                };
+                intermediate_b.push(byte);
+            };
 
-    Some(tcp_request)
+                //... convert "intermediate" to String and return it or error
+            if let Ok(c_request) = String::from_utf8(intermediate_b) {
+                Ok(c_request)
+            }
+            else {
+                return Err(())
+            }
+        },
+        Err(_) => {
+            Err(())
+        }
+    }
 }
 
 // "Call as 2"
@@ -214,36 +226,23 @@ fn parse_request(converted_request: Vec<String>) -> Result<CommandTypes, ErrorRe
 }
 
 // "Call from outside to connect all chunks together"
-pub fn handle_tcp(port: &str) {
-    let listener = TcpListener::bind("192.168.0.25:20050").expect("Couldn't spawn TCP Server on selected port!");
+pub fn handle_tcp() {
+    let tcp_server_adress = format!("0.0.0.0:{port}", port = inter::TCP_PORT);
+    let listener = TcpListener::bind(tcp_server_adress).expect("Couldn't spawn TCP Server on selected port!");
 
     for request in listener.incoming() {
-        if let Ok(stream) = request {
-            let converted_req = convert_request(&stream);
-
-            if converted_req.is_some() {
-                let parse_request = parse_request(converted_req.unwrap());
-                match parse_request {
-                    Ok(command) => { // All supported and correct parsed commands returns Ok()
-                        match command {
-                            CommandTypes::RegisterRes(login_data) => { // Recived when user call to "register" command
-                                if authenticate_user(login_data.login, login_data.password) {
-                                    ResponseTypes::Success.handle_response(Some(stream))
-                                }
-                                else {
-                                    ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin).handle_response(Some(stream))
-                                }
-                            },
-                            _ => () // unsuported commands doesn't handled here, here are handled only correctly recognized and parsed commnands. All incorrect commands are parsed by below "Err() "arm 
-                        }
-                    }
-                    Err(err_kind) => { // All incorrect  parsed messages are handled using this arm. Benath "handle_response(Some(stream))" method is systemt to handle all responses!!!
-                        ResponseTypes::Error(err_kind).handle_response(Some(stream))
+        if let Ok(mut stream) = request {
+            match handle_request(&mut stream) {
+                Ok(c_req) => {
+                    /* Do more... */
+                }
+                Err(_) => {
+                    /* handle probably error */
+                    println!("Recived response is incorrect!");
+                    if let Err(_) = stream.shutdown(std::net::Shutdown::Both) {
+                        println!("Couldn't close TCP connection after handled incorrect response!");
                     }
                 }
-            }
-            else { // while request packet is empty
-                ResponseTypes::Error(ErrorResponseKinds::IncorrectRequest).handle_response(Some(stream))
             }
         }
         else { // while error durning creation of stream handler

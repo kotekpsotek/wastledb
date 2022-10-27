@@ -4,6 +4,7 @@ mod connection {
 mod tui;
 #[path ="./login-system.rs"]
 mod login_system;
+mod inter;
 
 use clap::{ Command, Arg, ArgAction };
 
@@ -65,10 +66,10 @@ fn main() {
         }
     }
     else if let Some(_) = add_user.subcommand_matches("run") {
-        connection::tcp::handle_tcp("123");
+        connection::tcp::handle_tcp();
     }
     else {
-        connection::tcp::handle_tcp("123");
+        connection::tcp::handle_tcp();
     }
 }
 
@@ -78,8 +79,10 @@ mod tests {
     #[path = "../login-system.rs"]
     mod login_module;
 
-    use std::{ net::TcpStream, io::{Write, Read} };
+    use std::{ net::TcpStream, io::{Write, Read, BufReader, BufRead} };
     use login_module::authenticate_user;
+    use std::str;
+    use super::inter::MAXIMUM_RESPONSE_SIZE_BYTES;
 
     #[test]
     fn tcp_tester() {
@@ -96,12 +99,15 @@ mod tests {
 
     #[test]
     fn tcp_register_cmd() {
-        let mut connection = TcpStream::connect("192.168.0.25:20050").expect("Couldn't connect with server");
-        connection.write_all("Register;login|x=x|jan 1-1 password|x=x|123".as_bytes()).unwrap();
+        let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
         
-        // Read response
-        // let rs = &mut [] as &mut [u8];
-        // connection.re(rs).unwrap();
+        // Request
+        connection.write("Register;login|x=x|tester 1-1 password|x=x|123456789".as_bytes()).unwrap();
+
+        // Response
+        let mut buf = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
+        connection.read(&mut buf).expect("Couldn't read server response");
+        println!("Response is: {:?}", buf); // Same 0's = no response from server
     }
 
     #[test]
