@@ -1,12 +1,15 @@
-use std::io::{Write, Read};
+use std::{io::{Write, Read}, fmt::format};
 #[path ="../login-system.rs"]
 mod login_system;
 
 use {
     std::net::{ TcpStream, TcpListener },
-    std::io::{ BufReader, BufRead }
+    std::io::{ BufReader, BufRead },
+    std::collections::HashMap,
+    std::time::SystemTime
 };
 use login_system::authenticate_user;
+use uuid::Uuid;
 use crate::inter;
 
 // 
@@ -16,7 +19,7 @@ enum ResponseTypes {
 }
 
 impl ResponseTypes {
-    fn handle_response(&self, stream: Option<TcpStream>) {
+    fn handle_response(&self, stream: Option<TcpStream>, session_id: Option<String>) {
         // Give appropriate action to determined response status
         let mut result_message: String = "NOT".to_string();
             // When below code not handle response type in that case "NOT" response is returned to client
@@ -35,7 +38,8 @@ impl ResponseTypes {
             }
         }
         else if matches!(self, ResponseTypes::Success) {
-            result_message = "OK".to_string();
+            let session_id = session_id.expect(&format!("You must attach session id to \"{}\" method in order to handle correct results", stringify!(self.handle_response)));
+            result_message = format!("OK;{}", session_id).to_string();
         }
 
         // Send response
@@ -154,6 +158,11 @@ impl CommandTypes {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct SessionData {
+    timestamp: u128
+}
+
 // Call as 2
 // Handle pending request and return request message when it is correct
 // Err -> when: couldn't read request, colund't convert request to utf-8 string
@@ -224,6 +233,7 @@ fn process_request(c_req: String) -> Result<CommandTypes, ErrorResponseKinds> {
 pub fn handle_tcp() {
     let tcp_server_adress = format!("0.0.0.0:{port}", port = inter::TCP_PORT);
     let listener = TcpListener::bind(tcp_server_adress).expect("Couldn't spawn TCP Server on selected port!");
+    let mut sessions = HashMap::<String, String>::new(); // key - session id, data - session data in json format
 
     for request in listener.incoming() {
         if let Ok(mut stream) = request {
@@ -233,13 +243,50 @@ pub fn handle_tcp() {
                     match process_request(c_req) {
                         Ok(command_type) => {
                             match command_type {
-                                CommandTypes::RegisterRes(login_data) => {
-                                    // Check login corecteness
+                                // Save user session
+                                CommandTypes::RegisterRes(LoginCommandData { login, password }) => {
+                                    // ...Check login corecteness
+                                    let s = Some(stream);
+                                    if authenticate_user(login, password) {
+                                        fn gen_uuid(sessions: &HashMap<String, String>) -> String {
+                                            let uuid_v = Uuid::new_v4().to_string();
+                                            if sessions.contains_key(&uuid_v) {
+                                               return gen_uuid(sessions);
+                                            };
+                                            uuid_v
+                                        }
+                                        
+                                        // Save session into sessios list
+                                            //... Generate uuid_v4
+                                        let uuid_gen = gen_uuid(&sessions);
+                                            //... Compose session data in form of struct
+                                        let session_data = SessionData {
+                                            timestamp: match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+                                                Ok(dur) => dur.as_millis(),
+                                                Err(_) => 0
+                                            }
+                                        };
+                                            //... Serialize session data into JSON, handle result and send appropriate response to what is Result<..> outcome
+                                        match serde_json::to_string(&session_data) {
+                                            Ok(ses_val) => {
+                                                // Add session value to sessions list
+                                                sessions.insert(uuid_gen.clone(), ses_val);
+                                                println!("{:?}", sessions);
+
+                                                // Send response
+                                                ResponseTypes::Success.handle_response(s, Some(uuid_gen))
+                                            },
+                                            _ => ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(s, None)
+                                        };
+                                    }
+                                    else {
+                                        ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin).handle_response(s, None)
+                                    }
                                 },
                                 _ => ()
                             }
                         },
-                        Err(err_kind) => ResponseTypes::Error(err_kind).handle_response(Some(stream))
+                        Err(err_kind) => ResponseTypes::Error(err_kind).handle_response(Some(stream), None)
                     };
                 }
                 Err(_) => {
@@ -252,7 +299,7 @@ pub fn handle_tcp() {
             }
         }
         else { // while error durning creation of stream handler
-            ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(None)
+            ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(None, None)
         }
     }
 }

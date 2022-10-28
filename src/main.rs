@@ -107,7 +107,9 @@ mod tests {
         // Response
         let mut buf = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf).expect("Couldn't read server response");
-        println!("Response is: {:?}", buf); // Same 0's = no response from server
+
+        let resp_str = String::from_utf8(buf.to_vec()).unwrap();
+        println!("Response is: {:?}", resp_str); // Same 0's = no response from server
     }
 
     #[test]
