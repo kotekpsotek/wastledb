@@ -188,10 +188,9 @@ fn handle_request(stream: &mut TcpStream) -> Result<String, ()> {
 }
 
 // "Call as 2"
-// Recoginize commands, parse it and return Ok() when both steps was berformed correctly or return Err() when these both steps couldn't be performed. Error is returned as ErrorResponseKinds enum which can be handled directly by put it into enum "ResponseTypes" and call to method ".handle_response(tcp_stream)"
-fn parse_request(converted_request: Vec<String>) -> Result<CommandTypes, ErrorResponseKinds> {
-    let message = &converted_request[0]; // message can't be empty here
-    let message_semi_spli = message.split(";").collect::<Vec<&str>>(); // split message using semicolon
+// Recoginize commands and parse it then return Ok() when both steps was berformed correctly or return Err() when these both steps couldn't be performed. Error is returned as ErrorResponseKinds enum which can be handled directly by put it into enum "ResponseTypes" and call to method ".handle_response(tcp_stream)"
+fn process_request(c_req: String) -> Result<CommandTypes, ErrorResponseKinds> {
+    let message_semi_spli = c_req.split(";").collect::<Vec<&str>>(); // split message using semicolon
     if message_semi_spli.len() > 1 { // must be at least 2 pieces: "Message Type" and second in LTF order "Message Body"
             // mes type
         let message_type = message_semi_spli[0].to_lowercase();
@@ -205,12 +204,8 @@ fn parse_request(converted_request: Vec<String>) -> Result<CommandTypes, ErrorRe
         }
         else */ if message_type == "register" { // login user into database and save his session
             match CommandTypes::Register.parse_cmd(message_body) {
-                Ok(reg_cmd) => {
-                    Ok(reg_cmd) // Return: CommandTypes::RegisterRes(LoginCommandData { login: String::new("login datas"), password: String::new("password datas") })
-                },
-                Err(err) => {
-                    Err(err)
-                }
+                Ok(reg_cmd) => Ok(reg_cmd), // Under "reg_cmd" is returned: CommandTypes::RegisterRes(LoginCommandData { login: String::new("login datas"), password: String::new("password datas") })
+                Err(err) => Err(err)
             }
         }
         /* else if message_type == "keep-alive" { // keep user session saved when 
@@ -235,6 +230,17 @@ pub fn handle_tcp() {
             match handle_request(&mut stream) {
                 Ok(c_req) => {
                     /* Do more... */
+                    match process_request(c_req) {
+                        Ok(command_type) => {
+                            match command_type {
+                                CommandTypes::RegisterRes(login_data) => {
+                                    // Check login corecteness
+                                },
+                                _ => ()
+                            }
+                        },
+                        Err(err_kind) => ResponseTypes::Error(err_kind).handle_response(Some(stream))
+                    };
                 }
                 Err(_) => {
                     /* handle probably error */
@@ -248,15 +254,5 @@ pub fn handle_tcp() {
         else { // while error durning creation of stream handler
             ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(None)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn res_types_check_methods() {
-        ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(None)
     }
 }
