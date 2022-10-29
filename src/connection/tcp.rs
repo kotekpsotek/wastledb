@@ -44,8 +44,9 @@ impl ResponseTypes {
             }
         }
         else if matches!(self, ResponseTypes::Success(_)) {
-            let session_id = session_id.expect(&format!("You must attach session id to \"{}\" method in order to handle correct results", stringify!(self.handle_response)));
             result_message = if matches!(self, ResponseTypes::Success(true)) {
+                    //...here session id must be attached to method call
+                let session_id = session_id.expect(&format!("You must attach session id to \"{}\" method in order to handle correct results when {}", stringify!(self.handle_response), stringify!(Self::Success(true))));
                 format!("OK;{}", session_id).to_string()
             }
             else {
@@ -97,7 +98,8 @@ enum CommandTypes {
     Command,
     KeepAlive,
     RegisterRes(LoginCommandData), // Result of parsing "Register" command recognizer prior as "Register" child
-    KeepAliveRes(String, u128) // 1. Is for id of session retrived from msg_body, 2. Is for parse KeepAlive result where "u128" is generated timestamp of parse generation
+    KeepAliveRes(String, u128), // 1. Is for id of session retrived from msg_body, 2. Is for parse KeepAlive result where "u128" is generated timestamp of parse generation
+    CommandRes(String) // 1. SQL query content is attached under
 }
 
 struct CommandTypeKeyDiff<'s> { 
@@ -108,6 +110,7 @@ struct CommandTypeKeyDiff<'s> {
 impl CommandTypes {
     // Parse datas from recived request command
     // Return command type and its data such as login data
+    #[allow(unused_must_use)] // Err should be ignored only for inside call where are confidence of correcteness
     fn parse_cmd(&self, msg_body: &str, sessions: Option<&mut HashMap<String, String>>) -> Result<CommandTypes, ErrorResponseKinds> {
         if matches!(self, Self::Register) { // command to login user
             if msg_body.len() > 0 {
@@ -138,7 +141,7 @@ impl CommandTypes {
                     }
                 }
                 else {
-                    Err(ErrorResponseKinds::IncorrectLogin)
+                    Err(ErrorResponseKinds::IncorrectRequest)
                 }
             }
             else {
@@ -168,6 +171,50 @@ impl CommandTypes {
             }
             else {
                 Err(ErrorResponseKinds::GivenSessionDoesntExists)
+            }
+        }
+        else if matches!(self, Self::Command) { // command for execute sql query in database
+            let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
+            if msg_body_sep.len() == 2 { // isnide login section must be 2 pieces: 1 - session_id|x=x|session_id 2 - sql_query|x=x|sql query which will be executed on db
+                //... session
+                let request_session = self
+                    .clone()
+                    .parse_key_value(msg_body_sep[0]);
+
+                if let Some(CommandTypeKeyDiff { name, value }) = request_session {
+                    let sessions = sessions.unwrap(); 
+                    if name == "session_id" && sessions.contains_key(value) { // key "session_id" must always be first
+                        //... query
+                        let sql_query_key = self
+                            .clone()
+                            .parse_key_value(msg_body_sep[1]);
+                        
+                        if let Some(CommandTypeKeyDiff { name, value }) = sql_query_key {
+                            if name == "sql_query" && value.len() > 0 {
+                                // Extend session live time after call this command
+                                CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions));
+
+                                // Correct query response
+                                Ok(CommandTypes::CommandRes(value.to_string()))
+                            }
+                            else {
+                                Err(ErrorResponseKinds::IncorrectRequest)
+                            }
+                        }
+                        else {
+                            Err(ErrorResponseKinds::IncorrectRequest)
+                        }
+                    }
+                    else {
+                        Err(ErrorResponseKinds::IncorrectRequest)
+                    }
+                }
+                else {
+                    Err(ErrorResponseKinds::IncorrectRequest)
+                }
+            }
+            else {
+                Err(ErrorResponseKinds::IncorrectRequest)
             }
         }
         else { 
@@ -260,10 +307,10 @@ fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>
         let message_body = message_semi_spli[1];
        
         // Handle command
-        /* if message_type == "command" { // Execute command into db here
-            Ok(CommandTypes)
+        if message_type == "command" { // Execute command into db here
+            CommandTypes::Command.parse_cmd(message_body, sessions)
         }
-        else */ if message_type == "register" { // login user into database and save his session
+        else if message_type == "register" { // login user into database and save his session
             CommandTypes::Register.parse_cmd(message_body, None) // When Ok(_) is returned: CommandTypes::RegisterRes(LoginCommandData { login: String::new("login datas"), password: String::new("password datas") })
         }
         else if message_type == "keep-alive" { // keep user session saved when
@@ -345,6 +392,13 @@ pub fn handle_tcp() {
                                         // Send response
                                     ResponseTypes::Success(false).handle_response(Some(stream), Some(ses_id))
                                 },
+                                CommandTypes::CommandRes(query) => {
+                                    // Furthermore process query by database
+                                    println!("Query: {}", query);
+
+                                    // Send success response to client
+                                    ResponseTypes::Success(false).handle_response(Some(stream), None)
+                                }
                                 _ => ()
                             }
                         },

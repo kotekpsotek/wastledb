@@ -85,21 +85,7 @@ mod tests {
     use format as f;
     use super::inter::MAXIMUM_RESPONSE_SIZE_BYTES;
 
-    #[test]
-    fn tcp_tester() {
-        let mut stream = TcpStream::connect("0.0.0.0:20050").expect("Couldn't connect with server");
-        let _on1 = stream.write("Siemanko".as_bytes()).unwrap();
-        // stream.shutdown(std::net::Shutdown::Both).unwrap();
-        let _on2 = stream.write("Siemanko 2".as_bytes()).expect("Caused on 2 try");
-        let rcnt: &mut [u8] = &mut [1];
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        stream.read(rcnt).unwrap();
-        // println!("{:?}", rcnt);
-    }
-
-    #[test]
-    fn tcp_register_cmd() {
+    fn register_user_by_tcp() -> String {
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
         
         // Request
@@ -110,24 +96,35 @@ mod tests {
         connection.read(&mut buf).expect("Couldn't read server response");
 
         let resp_str = String::from_utf8(buf.to_vec()).unwrap();
-        println!("Response is: {:?}", resp_str); // Same 0's = no response from server
+        
+        // Return response
+        resp_str
+    }
+
+    #[test]
+    fn tcp_tester() {
+        let mut stream = TcpStream::connect("0.0.0.0:20050").expect("Couldn't connect with server");
+        let _on1 = stream.write("Siemanko".as_bytes()).unwrap();
+        // stream.shutdown(std::net::Shutdown::Both).unwrap();
+        let _on2 = stream.write("Siemanko 2".as_bytes()).expect("Caused on 2 try");
+        let rcnt: &mut [u8] = &mut [1];
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        stream.read(rcnt).unwrap();
+    }
+
+    #[test]
+    fn tcp_register_cmd() {
+        let response = register_user_by_tcp();
+        println!("Response is: {:?}", response); // Same 0's = no response from server
     }
 
     #[test]
     fn tcp_keepalive_cmd() {
         // First call = Register user
-        let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
-        
-            //... Request
-        connection.write("Register;login|x=x|tester 1-1 password|x=x|123456789".as_bytes()).unwrap();
-
-            //... Response
-        let mut buf = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
-        connection.read(&mut buf).expect("Couldn't read server response");
-
-        let resp_str = String::from_utf8(buf.to_vec()).unwrap();
+        let registered_response = register_user_by_tcp();
             //... session id in form without \0 (empty) characters
-        let sess_id = resp_str.split(";").collect::<Vec<&str>>()[1].replace("\0", "");
+        let sess_id = registered_response.split(";").collect::<Vec<&str>>()[1].replace("\0", "");
         
         // Second call (source)
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
@@ -138,6 +135,28 @@ mod tests {
             //... Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf2).expect("Couldn't read server response");
+        let resp2_str = String::from_utf8(buf2.to_vec()).unwrap();
+        println!("{}", resp2_str)
+    }
+
+    #[test]
+    fn tcp_command_cmd() {
+        // First call = Register user
+        let registered_response = register_user_by_tcp();
+            //... session id in form without \0 (empty) characters
+        let sess_id = registered_response.split(";").collect::<Vec<&str>>()[1].replace("\0", "");
+
+        // Second call (source)
+        let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
+
+            //... Request
+        connection.write(f!("Command;session_id|x=x|{} 1-1 sql_query|x=x|SELECT * FROM database_name", sess_id).as_bytes()).unwrap();
+
+            //... Response
+        let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
+        connection.read(&mut buf2).expect("Couldn't read server response");
+        
+                // ... parse response buf to String
         let resp2_str = String::from_utf8(buf2.to_vec()).unwrap();
         println!("{}", resp2_str)
     }
