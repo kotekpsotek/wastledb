@@ -9,12 +9,12 @@ use {
     std::time::SystemTime
 };
 use login_system::authenticate_user;
-use uuid::Uuid;
+use uuid::{Uuid, timestamp};
 use crate::inter;
 
 // 
 enum ResponseTypes {
-    Success,
+    Success(bool), // 1. whether attach to success response message user sess id
     Error(ErrorResponseKinds)
 }
 
@@ -24,10 +24,16 @@ impl ResponseTypes {
         let mut result_message: String = "NOT".to_string();
             // When below code not handle response type in that case "NOT" response is returned to client
         if matches!(self, ResponseTypes::Error(_)) { // handle not-sucesfull reasons
-            if matches!(self, ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason)) || matches!(self, ResponseTypes::Error(ErrorResponseKinds::IncorrectRequest)) { // Handle all for message "Err" response
+            if matches!(self, ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason)) || matches!(self, ResponseTypes::Error(ErrorResponseKinds::IncorrectRequest | ErrorResponseKinds::GivenSessionDoesntExists | ErrorResponseKinds::SessionTimeExpired)) { // Handle all for message "Err" response
                 let message_type = "Err;";
                 if matches!(self, ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason)) {
                     result_message = format!("{}{}", message_type, "UnexpectedReason");
+                }
+                else if matches!(self, ResponseTypes::Error(ErrorResponseKinds::GivenSessionDoesntExists)) { // given session by you doesn't exist
+                    result_message = format!("{}{}", message_type, "SessionDoesntExists")
+                }
+                else if matches!(self, ResponseTypes::Error(ErrorResponseKinds::SessionTimeExpired)) { // session can't be extended
+                    result_message = format!("{}{}", message_type, "SessionCouldntBeExtended")
                 }
                 else { // for all different
                     result_message = format!("{}{}", message_type, "IncorrectRequest");
@@ -37,9 +43,14 @@ impl ResponseTypes {
                 result_message = String::from("IncLogin;Null")
             }
         }
-        else if matches!(self, ResponseTypes::Success) {
+        else if matches!(self, ResponseTypes::Success(_)) {
             let session_id = session_id.expect(&format!("You must attach session id to \"{}\" method in order to handle correct results", stringify!(self.handle_response)));
-            result_message = format!("OK;{}", session_id).to_string();
+            result_message = if matches!(self, ResponseTypes::Success(true)) {
+                format!("OK;{}", session_id).to_string()
+            }
+            else {
+                "OK".to_string()
+            };
         }
 
         // Send response
@@ -69,7 +80,9 @@ impl ResponseTypes {
 enum ErrorResponseKinds {
     IncorrectRequest,
     UnexpectedReason,
-    IncorrectLogin // when user add incorrect login data or incorrect login data format (this difference is important)
+    IncorrectLogin, // when user add incorrect login data or incorrect login data format (this difference is important)
+    GivenSessionDoesntExists, // when session doesn't exists
+    SessionTimeExpired // when session time expired and couldn't live more
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +96,8 @@ enum CommandTypes {
     Register,
     Command,
     KeepAlive,
-    RegisterRes(LoginCommandData) // Result of parsing "Register" command recognizer prior as "Register" child
+    RegisterRes(LoginCommandData), // Result of parsing "Register" command recognizer prior as "Register" child
+    KeepAliveRes(String, u128) // 1. Is for id of session retrived from msg_body, 2. Is for parse KeepAlive result where "u128" is generated timestamp of parse generation
 }
 
 struct CommandTypeKeyDiff<'s> { 
@@ -94,7 +108,7 @@ struct CommandTypeKeyDiff<'s> {
 impl CommandTypes {
     // Parse datas from recived request command
     // Return command type and its data such as login data
-    fn parse_cmd(&self, msg_body: &str) -> Result<CommandTypes, ErrorResponseKinds> {
+    fn parse_cmd(&self, msg_body: &str, sessions: Option<&mut HashMap<String, String>>) -> Result<CommandTypes, ErrorResponseKinds> {
         if matches!(self, Self::Register) { // command to login user
             if msg_body.len() > 0 {
                 let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
@@ -131,6 +145,31 @@ impl CommandTypes {
                 Err(ErrorResponseKinds::IncorrectLogin)
             }
         }
+        else if matches!(self, Self::KeepAlive) { // command for extend session life
+            let sessions = sessions.expect("Sessions mustn't be None value");
+            if sessions.contains_key(msg_body) {
+                let ses_id = msg_body;
+
+                    //...Get session data and parse it from json format
+                let json_session_data = sessions.get(ses_id).unwrap();
+                let session_data_struct = serde_json::from_str::<SessionData>(json_session_data).unwrap(); // we assume that in session storage are only correct values!
+
+                    //...Retrive timestamp from session data and generate new timestamp to comparison
+                let timestamp = session_data_struct.timestamp;
+                let timestamp_new = get_timestamp();
+
+                    //...Test Whether session expiration can be extended and extend when can be 
+                if (timestamp + inter::MAXIMUM_SESSION_LIVE_TIME_MILS) >= timestamp_new {
+                    Ok(CommandTypes::KeepAliveRes(ses_id.to_string(), timestamp_new))
+                }
+                else {
+                    Err(ErrorResponseKinds::SessionTimeExpired)
+                }
+            }
+            else {
+                Err(ErrorResponseKinds::GivenSessionDoesntExists)
+            }
+        }
         else { 
             Err(ErrorResponseKinds::UnexpectedReason)
         }
@@ -161,6 +200,19 @@ impl CommandTypes {
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 struct SessionData {
     timestamp: u128
+}
+
+/* struct SessionHandler;
+impl SessionHandler {
+    
+} */
+
+// Callculate timestamp (how much milliseconds flow from 1 January 1970)
+fn get_timestamp() -> u128 {
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(dur) => dur.as_millis(),
+        Err(_) => 0
+    }
 }
 
 // Call as 2
@@ -198,7 +250,7 @@ fn handle_request(stream: &mut TcpStream) -> Result<String, ()> {
 
 // "Call as 2"
 // Recoginize commands and parse it then return Ok() when both steps was berformed correctly or return Err() when these both steps couldn't be performed. Error is returned as ErrorResponseKinds enum which can be handled directly by put it into enum "ResponseTypes" and call to method ".handle_response(tcp_stream)"
-fn process_request(c_req: String) -> Result<CommandTypes, ErrorResponseKinds> {
+fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>) -> Result<CommandTypes, ErrorResponseKinds> {
     let message_semi_spli = c_req.split(";").collect::<Vec<&str>>(); // split message using semicolon
     if message_semi_spli.len() > 1 { // must be at least 2 pieces: "Message Type" and second in LTF order "Message Body"
             // mes type
@@ -212,14 +264,11 @@ fn process_request(c_req: String) -> Result<CommandTypes, ErrorResponseKinds> {
             Ok(CommandTypes)
         }
         else */ if message_type == "register" { // login user into database and save his session
-            match CommandTypes::Register.parse_cmd(message_body) {
-                Ok(reg_cmd) => Ok(reg_cmd), // Under "reg_cmd" is returned: CommandTypes::RegisterRes(LoginCommandData { login: String::new("login datas"), password: String::new("password datas") })
-                Err(err) => Err(err)
-            }
+            CommandTypes::Register.parse_cmd(message_body, None) // When Ok(_) is returned: CommandTypes::RegisterRes(LoginCommandData { login: String::new("login datas"), password: String::new("password datas") })
         }
-        /* else if message_type == "keep-alive" { // keep user session saved when 
-
-        } */
+        else if message_type == "keep-alive" { // keep user session saved when
+            CommandTypes::KeepAlive.parse_cmd(message_body, sessions) // Process message body and return
+        }
         else { // when unsuported message was sended
             Err(ErrorResponseKinds::IncorrectRequest)
         }
@@ -240,7 +289,7 @@ pub fn handle_tcp() {
             match handle_request(&mut stream) {
                 Ok(c_req) => {
                     /* Do more... */
-                    match process_request(c_req) {
+                    match process_request(c_req.clone(), Some(&mut sessions)) {
                         Ok(command_type) => {
                             match command_type {
                                 // Save user session
@@ -261,20 +310,17 @@ pub fn handle_tcp() {
                                         let uuid_gen = gen_uuid(&sessions);
                                             //... Compose session data in form of struct
                                         let session_data = SessionData {
-                                            timestamp: match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
-                                                Ok(dur) => dur.as_millis(),
-                                                Err(_) => 0
-                                            }
+                                            timestamp: get_timestamp()
                                         };
                                             //... Serialize session data into JSON, handle result and send appropriate response to what is Result<..> outcome
                                         match serde_json::to_string(&session_data) {
                                             Ok(ses_val) => {
                                                 // Add session value to sessions list
                                                 sessions.insert(uuid_gen.clone(), ses_val);
-                                                println!("{:?}", sessions);
+                                                // println!("{:?}", sessions); // Test: print all sessions in list after add new session
 
                                                 // Send response
-                                                ResponseTypes::Success.handle_response(s, Some(uuid_gen))
+                                                ResponseTypes::Success(true).handle_response(s, Some(uuid_gen))
                                             },
                                             _ => ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(s, None)
                                         };
@@ -282,6 +328,22 @@ pub fn handle_tcp() {
                                     else {
                                         ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin).handle_response(s, None)
                                     }
+                                },
+                                CommandTypes::KeepAliveRes(ses_id, timestamp) => { // command to extend session life (heartbeat system -> so keep-alive)
+                                    // extend session to new timestamp
+                                        //...Parse extended session timestamp to other not changed session data
+                                    let old_session_data = sessions.get(&ses_id).unwrap(); // assumes that in this place session must exists and is able to be extended
+                                    let new_sess_data = SessionData {
+                                        timestamp,
+                                        ..serde_json::from_str::<SessionData>(old_session_data).unwrap()
+                                    };
+                                    // println!("New: {:#?}\n\nOld: {:#?}", new_sess_data, old_session_data); //Test: integrity check log
+                                    let json_new_sess_data = serde_json::to_string(&new_sess_data).unwrap();
+                                        //...Update session
+                                    sessions.insert(ses_id.clone(), json_new_sess_data);
+
+                                        // Send response
+                                    ResponseTypes::Success(false).handle_response(Some(stream), Some(ses_id))
                                 },
                                 _ => ()
                             }

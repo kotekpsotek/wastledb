@@ -82,6 +82,7 @@ mod tests {
     use std::{ net::TcpStream, io::{Write, Read, BufReader, BufRead} };
     use login_module::authenticate_user;
     use std::str;
+    use format as f;
     use super::inter::MAXIMUM_RESPONSE_SIZE_BYTES;
 
     #[test]
@@ -110,6 +111,35 @@ mod tests {
 
         let resp_str = String::from_utf8(buf.to_vec()).unwrap();
         println!("Response is: {:?}", resp_str); // Same 0's = no response from server
+    }
+
+    #[test]
+    fn tcp_keepalive_cmd() {
+        // First call = Register user
+        let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
+        
+            //... Request
+        connection.write("Register;login|x=x|tester 1-1 password|x=x|123456789".as_bytes()).unwrap();
+
+            //... Response
+        let mut buf = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
+        connection.read(&mut buf).expect("Couldn't read server response");
+
+        let resp_str = String::from_utf8(buf.to_vec()).unwrap();
+            //... session id in form without \0 (empty) characters
+        let sess_id = resp_str.split(";").collect::<Vec<&str>>()[1].replace("\0", "");
+        
+        // Second call (source)
+        let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
+
+            //... Request
+        connection.write(f!("Keep-Alive;{}", sess_id).as_bytes()).unwrap();
+
+            //... Response
+        let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
+        connection.read(&mut buf2).expect("Couldn't read server response");
+        let resp2_str = String::from_utf8(buf2.to_vec()).unwrap();
+        println!("{}", resp2_str)
     }
 
     #[test]
