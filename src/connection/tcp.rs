@@ -1,6 +1,10 @@
 use std::{io::{Write, Read}, fmt::format};
 #[path ="../login-system.rs"]
 mod login_system;
+#[path ="../management"]
+mod management {
+    pub mod main;
+}
 
 use {
     std::net::{ TcpStream, TcpListener },
@@ -11,6 +15,7 @@ use {
 use login_system::authenticate_user;
 use uuid::{Uuid, timestamp};
 use crate::inter;
+use management::main::Outcomes::*;
 
 // 
 enum ResponseTypes {
@@ -23,7 +28,8 @@ impl ResponseTypes {
         // Give appropriate action to determined response status
         let mut result_message: String = "NOT".to_string();
             // When below code not handle response type in that case "NOT" response is returned to client
-        if matches!(self, ResponseTypes::Error(_)) { // handle not-sucesfull reasons
+        if matches!(self, ResponseTypes::Error(_)) { 
+            // handle not-sucesfull reasons (only here)
             if matches!(self, ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason)) || matches!(self, ResponseTypes::Error(ErrorResponseKinds::IncorrectRequest | ErrorResponseKinds::GivenSessionDoesntExists | ErrorResponseKinds::SessionTimeExpired)) { // Handle all for message "Err" response
                 let message_type = "Err;";
                 if matches!(self, ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason)) {
@@ -41,6 +47,9 @@ impl ResponseTypes {
             }
             else if matches!(self, ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin)) {
                 result_message = String::from("IncLogin;Null")
+            }
+            else if matches!(self, ResponseTypes::Error(ErrorResponseKinds::CouldntPerformQuery(_))) { // when query couldn't be performed
+                result_message = format!("Couldn't perform query") // TODO: add reason from "ErrorResponseKinds::CouldntPerformQuery(_)" (is in omitted place by "_")
             }
         }
         else if matches!(self, ResponseTypes::Success(_)) {
@@ -83,7 +92,8 @@ enum ErrorResponseKinds {
     UnexpectedReason,
     IncorrectLogin, // when user add incorrect login data or incorrect login data format (this difference is important)
     GivenSessionDoesntExists, // when session doesn't exists
-    SessionTimeExpired // when session time expired and couldn't live more
+    SessionTimeExpired, // when session time expired and couldn't live more
+    CouldntPerformQuery(String) // send when couldnt perform query sended in command from some reason
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +120,7 @@ struct CommandTypeKeyDiff<'s> {
 impl CommandTypes {
     // Parse datas from recived request command
     // Return command type and its data such as login data
+    // SQL query are processed inside
     #[allow(unused_must_use)] // Err should be ignored only for inside call where are confidence of correcteness
     fn parse_cmd(&self, msg_body: &str, sessions: Option<&mut HashMap<String, String>>) -> Result<CommandTypes, ErrorResponseKinds> {
         if matches!(self, Self::Register) { // command to login user
@@ -194,8 +205,20 @@ impl CommandTypes {
                                 // Extend session live time after call this command
                                 CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions));
 
+                                // Process query
+                                let q_processed_r = self::management::main::process_query(value);
+                                match q_processed_r {
+                                    Success(desc_opt) => {
+                                        if let Some(desc) = desc_opt {
+                                            return Ok(CommandTypes::CommandRes(desc))
+                                        };
+
+                                        Ok(CommandTypes::CommandRes(format!("Query has been performed")))
+                                    },
+                                    Error(reason) => Err(ErrorResponseKinds::CouldntPerformQuery(reason))
+                                }
+
                                 // Correct query response
-                                Ok(CommandTypes::CommandRes(value.to_string()))
                             }
                             else {
                                 Err(ErrorResponseKinds::IncorrectRequest)
@@ -399,7 +422,7 @@ pub fn handle_tcp() {
                                     // Send success response to client
                                     ResponseTypes::Success(false).handle_response(Some(stream), None)
                                 }
-                                _ => ()
+                                _ => () // other types aren't results
                             }
                         },
                         Err(err_kind) => ResponseTypes::Error(err_kind).handle_response(Some(stream), None)
