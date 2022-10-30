@@ -112,7 +112,7 @@ enum CommandTypes {
     CommandRes(String) // 1. SQL query content is attached under
 }
 
-struct CommandTypeKeyDiff<'s> { 
+pub struct CommandTypeKeyDiff<'s> { 
     name: &'s str,
     value: &'s str
 }
@@ -186,27 +186,50 @@ impl CommandTypes {
         }
         else if matches!(self, Self::Command) { // command for execute sql query in database
             let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
-            if msg_body_sep.len() == 2 { // isnide login section must be 2 pieces: 1 - session_id|x=x|session_id 2 - sql_query|x=x|sql query which will be executed on db
+            if msg_body_sep.len() >= 2 { // isnide login section must be minimum 2 pieces: 1 - session_id|x=x|session_id 2 - sql_query|x=x|sql query which will be executed on db, 3 - ...described inside block
                 //... session
                 let request_session = self
                     .clone()
                     .parse_key_value(msg_body_sep[0]);
 
-                if let Some(CommandTypeKeyDiff { name, value }) = request_session {
+                if let Some(CommandTypeKeyDiff { name, value: session_id }) = request_session {
                     let sessions = sessions.unwrap(); 
-                    if name == "session_id" && sessions.contains_key(value) { // key "session_id" must always be first
+                    if name == "session_id" && sessions.contains_key(session_id) { // key "session_id" must always be first
                         //... query
                         let sql_query_key = self
                             .clone()
                             .parse_key_value(msg_body_sep[1]);
-                        
+                            // preseneted when user would like connect to database // this option always must be 3 in order
+                        let connect_auto = if msg_body_sep.len() >= 3 { // to pass this option must be presented prior 2 keys so: 1. session_id, 2. command (src)  
+                            if let Some(CommandTypeKeyDiff { name, value }) = self.clone().parse_key_value(msg_body_sep[2]) {
+                                if name == "connect_auto" && vec!["true", "false"].contains(&value) {
+                                    Some(
+                                        CommandTypeKeyDiff {
+                                            name,
+                                            value
+                                        }
+                                    )
+                                }
+                                else {
+                                    None
+                                }
+                            }
+                            else {
+                                None
+                            }
+                        }
+                        else {
+                            None
+                        };
+
+                            // exists when user would like connect with database
                         if let Some(CommandTypeKeyDiff { name, value }) = sql_query_key {
                             if name == "sql_query" && value.len() > 0 {
                                 // Extend session live time after call this command
                                 CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions));
 
                                 // Process query
-                                let q_processed_r = self::management::main::process_query(value);
+                                let q_processed_r = self::management::main::process_query(value, connect_auto, session_id.into(), sessions);
                                 match q_processed_r {
                                     Success(desc_opt) => {
                                         if let Some(desc) = desc_opt {
@@ -268,10 +291,10 @@ impl CommandTypes {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
-struct SessionData {
-    timestamp: u128
+pub struct SessionData {
+    timestamp: u128,
+    connected_to_database: Option<String>
 }
-
 /* struct SessionHandler;
 impl SessionHandler {
     
@@ -380,7 +403,8 @@ pub fn handle_tcp() {
                                         let uuid_gen = gen_uuid(&sessions);
                                             //... Compose session data in form of struct
                                         let session_data = SessionData {
-                                            timestamp: get_timestamp()
+                                            timestamp: get_timestamp(),
+                                            connected_to_database: None // TODO: Add feature to connect for database after initial connection
                                         };
                                             //... Serialize session data into JSON, handle result and send appropriate response to what is Result<..> outcome
                                         match serde_json::to_string(&session_data) {
