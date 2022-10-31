@@ -1,4 +1,6 @@
-use sqlparser::{ dialect::PostgreSqlDialect, parser::Parser as SqlParser, ast::{Statement, ObjectName, Ident} };
+use sqlparser::{ dialect::PostgreSqlDialect, parser::Parser as SqlParser, ast::{Statement, ObjectName} };
+use datafusion::prelude::*;
+use tokio;
 use format as f;
 use Outcomes::*;
 use std::{ fs, path::Path, collections::HashMap };
@@ -44,7 +46,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                     Statement::CreateDatabase { db_name: ObjectName(data_base), if_not_exists: _, location: _, managed_location: _ } => {
                         let db_name_val = &data_base[0].value;
                         
-                        if db_name_val.len() > 0 && !unavailable::os_file_system_check_unavailable_characters_into(&db_name_val) {
+                        if db_name_val.len() > 0 && !unavailable::os_file_system_check_unavailable_characters_into(&db_name_val) && !unavailable::FILENAMES_WINDOWS.contains(&db_name_val.as_str()) {
                             let session_data = sessions.get(&session_id).unwrap(); // here session must exists FIXME: In feature (after addition system to remove session after crossed "session persists time (TTL otherwise)" time that session can stop exists here)
                             let mut session_data = serde_json::from_str::<SessionData>(session_data).unwrap();
                             
@@ -78,14 +80,14 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                             break Error(f!("Database name is not correct!"));
                         }
                     },
-                    /* Statement::CreateTable { 
+                    Statement::CreateTable { 
                         or_replace: _, 
                         temporary: _, 
                         external: _, 
                         global: _, 
                         if_not_exists: _, 
                         name, 
-                        columns, 
+                        columns: _, 
                         constraints: _, 
                         hive_distribution: _, 
                         hive_formats: _, 
@@ -103,8 +105,61 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                         on_commit: _, 
                         on_cluster: _ 
                     } => {
+                        let session_data = serde_json::from_str::<SessionData>(sessions.get(&session_id).unwrap()).unwrap();
+                        
+                        if session_data.connected_to_database.is_some() {
+                            if Path::new(&f!("../source/dbs/{db}", db = session_data.connected_to_database.clone().unwrap())).exists() {
+                                let table_name = if name.0.len() > 0 {
+                                    Some(&name.0[0].value)
+                                }
+                                else {
+                                    None
+                                };
 
-                    }, */
+                                if let Some(table_name) = table_name {
+                                    let connection_db = session_data.connected_to_database.clone();
+                                    let f_p_s = f!("../source/dbs/{db}/{tb}.json", db = connection_db.unwrap(), tb = table_name);
+                                    let f_p = Path::new(&f_p_s);
+                                    let op = fs::write(f_p, "");
+                                    
+                                    if op.is_ok() {
+                                        // + execute query by apache arrow-datafusion on created path
+                                        let mut op_success = true;
+                                        let _rt = tokio::runtime::Runtime::new()
+                                            .unwrap()
+                                            .block_on(async {
+                                                let cx = SessionContext::new(); // apache arrow-datafusioo library contect for operation
+                                                let f_p = f_p.as_os_str().to_str().unwrap();
+        
+                                                cx.register_json(table_name, f_p, NdJsonReadOptions::default()).await.unwrap();
+        
+                                                let sql_q = cx.sql(sql_query).await;
+                                                match sql_q {
+                                                    Ok(_res) => {
+                                                        println!("CREATE TABLE command executed correctly")
+                                                    },
+                                                    _ => op_success = false
+                                                }
+                                            });
+                                        
+                                        if op_success {
+                                            break Success(None);
+                                        }
+                                        else {
+                                            break Error(f!("Couldn't create table. Incorrect query"));
+                                        }
+                                    };
+
+                                    break Error(f!("Couldn't create table")); 
+                                }
+                                
+                            };
+
+                            break Error(f!("Database to which you're connected doesn't exists!"));
+                        }
+
+                        break Error(f!("You're not connected to any database. In order to execute this command you must be connected!"));
+                    },
                     _ => {
                         if parse_op_result.len() > it {
                             continue;

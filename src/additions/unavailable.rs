@@ -4,6 +4,8 @@ pub const CHARACTERS_WINDOWS: &[&str] = &["<", ">", ":", "\"", "/", "\\", "|", "
 pub const CHARACTERS_LINUX: &[&str] = &["/"];
 pub const CHARACTERS_MACOS: &[&str] = &[":", "/"];
 
+pub const FILENAMES_WINDOWS: &[&str] = &["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"];
+
 pub fn unavailable_characters_for_system() -> &'static [&'static str] {
     let syst_name = sysinfo::System::default().name().unwrap().to_lowercase();
     if syst_name == "windows" {

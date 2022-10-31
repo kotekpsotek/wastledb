@@ -150,7 +150,7 @@ mod tests {
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
 
             //... Request
-        connection.write(f!("Command;session_id|x=x|{} 1-1 sql_query|x=x|CREATE DATABASE dogo 1-1 connect_auto|x=x|true", sess_id).as_bytes()).unwrap();
+        connection.write(f!("Command;session_id|x=x|{} 1-1 sql_query|x=x|CREATE TABLE dogo 1-1 connect_auto|x=x|true", sess_id).as_bytes()).unwrap();
 
             //... Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
