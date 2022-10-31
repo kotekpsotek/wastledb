@@ -448,8 +448,6 @@ pub fn handle_tcp() {
                                             },
                                             _ => ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(s, None)
                                         };
-
-                                        println!("{:?}", sessions)
                                     }
                                     else {
                                         ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin).handle_response(s, None)

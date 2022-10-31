@@ -1,4 +1,5 @@
-use sqlparser::{ dialect::PostgreSqlDialect, parser::Parser as SqlParser, ast::{Statement, ObjectName} };
+use sqlparser::{ dialect::AnsiDialect, parser::Parser as SqlParser, ast::{Statement, ObjectName} };
+#[allow(unused)]
 use datafusion::prelude::*;
 use tokio;
 use format as f;
@@ -6,18 +7,13 @@ use Outcomes::*;
 use std::{ fs, path::Path, collections::HashMap };
 
 use crate::connection::tcp::{ CommandTypeKeyDiff, SessionData };
+use crate::management::sql_json::{ process_sql };
 use self::additions::unavailable;
 
 #[path ="../additions"]
 mod additions {
     pub mod unavailable;
 }
-/* struct DB_Logs;
-impl DB_Logs {
-    fn log(message, ) {
-
-    }
-} */
 
 #[derive(Debug)]
 pub enum Outcomes {
@@ -27,7 +23,7 @@ pub enum Outcomes {
 
 pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::CommandTypeKeyDiff>, session_id: String, sessions: &mut HashMap<String, String>) -> Outcomes {
     let sql_query = query;
-    let selected_sql_dialect = PostgreSqlDialect {};
+    let selected_sql_dialect = AnsiDialect {};
     let parse_operation = SqlParser::parse_sql(&selected_sql_dialect, sql_query);
 
     match parse_operation {
@@ -37,7 +33,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
             let mut it = 0;
             loop {
                 let lexical_sql = parse_op_result[it].clone();
-                println!("{:?}", lexical_sql);
+                // println!("{:?}", lexical_sql);
                 it += 1;
 
                 // Do specific action
@@ -120,39 +116,32 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                                     let connection_db = session_data.connected_to_database.clone();
                                     let f_p_s = f!("../source/dbs/{db}/{tb}.json", db = connection_db.unwrap(), tb = table_name);
                                     let f_p = Path::new(&f_p_s);
-                                    let op = fs::write(f_p, "");
-                                    
-                                    if op.is_ok() {
-                                        // + execute query by apache arrow-datafusion on created path
-                                        let mut op_success = true;
-                                        let _rt = tokio::runtime::Runtime::new()
-                                            .unwrap()
-                                            .block_on(async {
-                                                let cx = SessionContext::new(); // apache arrow-datafusioo library contect for operation
-                                                let f_p = f_p.as_os_str().to_str().unwrap();
-        
-                                                cx.register_json(table_name, f_p, NdJsonReadOptions::default()).await.unwrap();
-        
-                                                let sql_q = cx.sql(sql_query).await;
-                                                match sql_q {
-                                                    Ok(_res) => {
-                                                        println!("CREATE TABLE command executed correctly")
-                                                    },
-                                                    _ => op_success = false
-                                                }
-                                            });
-                                        
-                                        if op_success {
-                                            break Success(None);
-                                        }
-                                        else {
-                                            break Error(f!("Couldn't create table. Incorrect query"));
-                                        }
-                                    };
 
-                                    break Error(f!("Couldn't create table")); 
+                                    if !f_p.exists() {                                    
+                                        // + execute query by apache arrow-datafusion on created path
+                                        match process_sql(sql_query) {
+                                            Ok(table) => {
+                                                let r_json = serde_json::to_string(&table); // for pretty format data use serde_json::to_string_pretty(&table), but it will use unnecessary characters (for pretty print u can use nested VS Code .json formater) 
+
+                                                if let Err(_) = r_json {
+                                                    break Error(f!("Couldn't create table"));
+                                                };
+
+                                                if let Ok(_) = fs::write(f_p, r_json.unwrap()) {
+                                                    break Success(None);
+                                                }
+                                                else {
+                                                    break Error(f!("Couldn't create table"));
+                                                }
+                                            },
+                                            // is returned for exmaple when: to column is attached unsupported type by function compared "process_sql" function
+                                            Err(_) => break Error(f!("Couldn't create table"))
+                                        }
+                                    }
+                                    else {
+                                        break Error(f!("This table already exists so it can't be re-created"));
+                                    }
                                 }
-                                
                             };
 
                             break Error(f!("Database to which you're connected doesn't exists!"));
@@ -186,4 +175,14 @@ fn sql_parser_test() {
     let sql_dialect = sqlparser::dialect::PostgreSqlDialect {};
     let parsed_sql = sqlparser::parser::Parser::parse_sql(&sql_dialect, sql).unwrap();
     println!("{:?}", parsed_sql)
+}
+
+#[tokio::test]
+async fn create_table() {
+    let cx = SessionContext::new();
+    cx.register_json("ready", "../source/dbs/test/table.json", NdJsonReadOptions::default()).await.expect("Couldn't register table.json file");
+
+    let sql_t = cx.sql("INSERT INTO new_table (col1, col2) VALUES (1, 2)").await.unwrap();
+
+    let _dat = sql_t.collect().await.unwrap();
 }

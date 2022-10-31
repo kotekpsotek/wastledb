@@ -60,7 +60,7 @@ pub struct JsonSQLTableColumnRow {
 /// When something went bad durning analyze or processing sql query then Error without any description is returned
 // Note: Polish characters are not supported by sqlparser, so not use them into queries
 #[must_use = "In order to assure the best level of relaibility"]
-fn process_sql(sql: &str) -> Result<JsonSQLTable, ()> {
+pub fn process_sql(sql: &str) -> Result<JsonSQLTable, ()> {
     let dialect = sqlparser::dialect::AnsiDialect {};
     let parse_and_analyze_operation = sqlparser::parser::Parser::parse_sql(&dialect, sql)
         .map_or_else(
@@ -107,7 +107,7 @@ fn process_sql(sql: &str) -> Result<JsonSQLTable, ()> {
                     let col_data_type = {
                         let dt = match column.data_type {
                             DataType::Varchar(len) => {
-                                // when len = None is used maximum length // specified uinit is always expressed in bytes unit
+                                // when len = None is used maximum length and in JSON file VARCHAR type has assigned null // specified uinit is always expressed in bytes unit
                                 let r = len
                                     .clone()
                                     .map_or_else(
