@@ -10,7 +10,8 @@ use {
     std::net::{ TcpStream, TcpListener },
     std::io::{ BufReader, BufRead },
     std::collections::HashMap,
-    std::time::SystemTime
+    std::time::SystemTime,
+    std::path::Path
 };
 use login_system::authenticate_user;
 use uuid::{Uuid, timestamp};
@@ -99,7 +100,8 @@ enum ErrorResponseKinds {
 #[derive(Debug, Clone)]
 struct LoginCommandData { // Login user data
     login: String,
-    password: String
+    password: String,
+    connected_to_db: Option<String>
 }
 
 #[derive(Clone, Debug)]
@@ -112,6 +114,7 @@ enum CommandTypes {
     CommandRes(String) // 1. SQL query content is attached under
 }
 
+#[derive(Debug)]
 pub struct CommandTypeKeyDiff<'s> { 
     name: &'s str,
     value: &'s str
@@ -126,8 +129,34 @@ impl CommandTypes {
         if matches!(self, Self::Register) { // command to login user
             if msg_body.len() > 0 {
                 let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
-                if msg_body_sep.len() == 2 { // isnide login section must be 2 pieces: 1 - login|x=x|logindata 2 - password|x=x|passworddata
-                    let mut keys_required_list = LoginCommandData { login: String::new(), password: String::new() };
+                if msg_body_sep.len() >= 2 { // isnide login section must be 2 pieces: 1 - login|x=x|logindata 2 - password|x=x|passworddata 3 - connect_auto|x=x|true
+                    
+                    let mut keys_required_list = LoginCommandData { 
+                        login: String::new(), 
+                        password: String::new() ,
+                        connected_to_db: if msg_body_sep.len() >= 3 {
+                            let val_option = self.clone().parse_key_value(msg_body_sep[2]);
+                            
+                            if val_option.is_some() {
+                                let val_option = val_option.unwrap();
+
+                                if val_option.name == "connect_auto" && val_option.value.len() > 0 && Path::new(&format!("../source/dbs/{}", val_option.value)).exists() {
+                                    let db_name = val_option.value.to_string();
+                                    Some(db_name)
+                                }
+                                else {
+                                    None
+                                }
+                                
+                            }
+                            else {
+                                None
+                            }
+                        }
+                        else {
+                            None
+                        }
+                    };
 
                     // Sepearte value from key and assing value to return struct
                     for key in msg_body_sep {
@@ -386,7 +415,7 @@ pub fn handle_tcp() {
                         Ok(command_type) => {
                             match command_type {
                                 // Save user session
-                                CommandTypes::RegisterRes(LoginCommandData { login, password }) => {
+                                CommandTypes::RegisterRes(LoginCommandData { login, password, connected_to_db }) => {
                                     // ...Check login corecteness
                                     let s = Some(stream);
                                     if authenticate_user(login, password) {
@@ -404,8 +433,9 @@ pub fn handle_tcp() {
                                             //... Compose session data in form of struct
                                         let session_data = SessionData {
                                             timestamp: get_timestamp(),
-                                            connected_to_database: None // TODO: Add feature to connect for database after initial connection
+                                            connected_to_database: connected_to_db
                                         };
+
                                             //... Serialize session data into JSON, handle result and send appropriate response to what is Result<..> outcome
                                         match serde_json::to_string(&session_data) {
                                             Ok(ses_val) => {
@@ -418,6 +448,8 @@ pub fn handle_tcp() {
                                             },
                                             _ => ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(s, None)
                                         };
+
+                                        println!("{:?}", sessions)
                                     }
                                     else {
                                         ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin).handle_response(s, None)
