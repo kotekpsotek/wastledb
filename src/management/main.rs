@@ -1,4 +1,4 @@
-use sqlparser::{ dialect::AnsiDialect, parser::Parser as SqlParser, ast::{Statement, ObjectName, SetExpr, Expr} };
+use sqlparser::{ dialect::AnsiDialect, parser::Parser as SqlParser, ast::{Statement, ObjectName, SetExpr, Expr, DataType, ColumnOptionDef} };
 #[allow(unused)]
 use datafusion::prelude::*;
 use format as f;
@@ -6,13 +6,16 @@ use Outcomes::*;
 use std::{ fs, path::Path, collections::HashMap };
 
 use crate::{connection::tcp::{ CommandTypeKeyDiff, SessionData }, management::sql_json::{self, ProcessSQLSupportedQueries}};
-use crate::management::sql_json::{ process_sql, ProcessSQLRowField as Field };
+use crate::management::sql_json::{ process_sql, ProcessSQLRowField as Field, SupportedSQLDataTypes, SupportedSQLColumnConstraints, ConvertSQLParserTypesToSupported, ConvertSQLParserOptionsToSupportedConstraints };
 use self::additions::unavailable;
 
 #[path ="../additions"]
 mod additions {
     pub mod unavailable;
 }
+
+impl ConvertSQLParserTypesToSupported for DataType {}
+impl ConvertSQLParserOptionsToSupportedConstraints for ColumnOptionDef {}
 
 #[derive(Debug)]
 pub enum Outcomes {
@@ -82,7 +85,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                         global: _, 
                         if_not_exists: _, 
                         name, 
-                        columns: _, 
+                        columns, 
                         constraints: _, 
                         hive_distribution: _, 
                         hive_formats: _, 
@@ -101,9 +104,10 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                         on_cluster: _ 
                     } => {
                         let session_data = serde_json::from_str::<SessionData>(sessions.get(&session_id).unwrap()).unwrap();
-                        
+
                         if session_data.connected_to_database.is_some() {
                             if Path::new(&f!("../source/dbs/{db}", db = session_data.connected_to_database.clone().unwrap())).exists() {
+                                // Obtain table name and put it into Option<String>
                                 let table_name = if name.0.len() > 0 {
                                     Some(&name.0[0].value)
                                 }
@@ -111,14 +115,61 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                                     None
                                 };
 
+                                // Table name must be attached in query!
                                 if let Some(table_name) = table_name {
                                     let connection_db = session_data.connected_to_database.clone();
                                     let f_p_s = f!("../source/dbs/{db}/{tb}.json", db = connection_db.unwrap(), tb = table_name);
                                     let f_p = Path::new(&f_p_s);
 
                                     if !f_p.exists() {                                    
-                                        // + execute query by apache arrow-datafusion on created path
-                                        match process_sql(sql_query, None) {
+                                        // obtain column properties in order to allow create a table
+                                        let mut columns_cv = vec![] as Vec<(String, SupportedSQLDataTypes, Option<Vec<SupportedSQLColumnConstraints>>)>;
+                                        for column in &columns {
+                                            // obtain required properties from column
+                                            let col_name = column.name.clone().value;
+                                            let col_data_type = if let Some(r#type) = DataType::convert(&column.data_type) {
+                                                r#type
+                                            }
+                                            else {
+                                                // when type from query isn't supported then break whole loop from ACID model reason
+                                                break;
+                                            };
+                                            let col_constraints = {
+                                                let mut constraints = vec![] as Vec<SupportedSQLColumnConstraints>;
+                                                if column.options.len() > 0 {
+                                                    for option in column.options.clone() {
+                                                        if let Some(constraint) = ColumnOptionDef::convert(option) {
+                                                            constraints.push(constraint)
+                                                        }
+                                                        else {
+                                                            // When option isn't supported
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                constraints
+                                            };
+
+                                            // compose column and attach it to vector
+                                            let ready_column = (col_name, col_data_type, {
+                                                if col_constraints.len() > 0 {
+                                                    Some(col_constraints)
+                                                }
+                                                else {
+                                                    None
+                                                }
+                                            });
+                                            columns_cv.push(ready_column);
+                                        };
+                                        if columns_cv.len() != columns.len() { // when all columns wasn't correctly processed
+                                            break Error(f!("In query you attach unsupported type or this has been caused by other query inconsistent factor"));
+                                        };
+
+                                        // Create table in json format and write it to file located into database folder. Table file name is table name attached to query
+                                        match process_sql(ProcessSQLSupportedQueries::CreateTable(
+                                            table_name.into(), 
+                                            columns_cv
+                                        )) {
                                             Ok(table) => {
                                                 let r_json = serde_json::to_string(&table); // for pretty format data use serde_json::to_string_pretty(&table), but it will use unnecessary characters (for pretty print u can use nested VS Code .json formater) 
 
@@ -236,7 +287,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                                 };
 
                                 // Create table with new inserted records and save it
-                                match process_sql(sql_query, Some(ProcessSQLSupportedQueries::Insert(dbt_path, None, values_from_query))) {
+                                match process_sql(ProcessSQLSupportedQueries::Insert(dbt_path, None, values_from_query)) {
                                     Ok(ready_table) => {
                                         // Put table into string
                                         let table_ready_stri_op = serde_json::to_string(&ready_table);
