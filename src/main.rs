@@ -155,7 +155,7 @@ mod tests {
 
             //... Request 
             // Remained options (not used in sended query) (with separators): 1-1 connect_auto|x=x|true
-        connection.write(f!("Command;session_id|x=x|{} 1-1 sql_query|x=x|CREATE TABLE dogo6 (name varchar, age int, gender varchar(255))", sess_id).as_bytes()).unwrap();
+        connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|INSERT INTO "dogo6" VALUES ('piesek', 234, 'male');"#, sess_id).as_bytes()).unwrap();
 
             //... Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
