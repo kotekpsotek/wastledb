@@ -203,7 +203,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                         or: _, 
                         into, 
                         table_name, 
-                        columns: _, // TODO: Add later support for attachement for specific columns
+                        columns, // TODO: Add later support for attachement for specific columns
                         overwrite,
                         source, 
                         partitioned: _, 
@@ -248,7 +248,23 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
 
                                 // Create only when database and tab;e exists
                                 if db_path.exists() && dbt_path.exists() {
-                                    // Obtain values (to insert for columns) from insert query (whole)
+                                    // Obtain for which coulmns operation must be performed only
+                                    let columns_from_query = {
+                                        // To return Some(_) columns len from lexer must be greater then 0 hence them must exists
+                                        if columns.len() > 0 {
+                                            let mut c_r = Vec::new() as Vec<String>;
+                                            for column in columns {
+                                                let column_name = column.value;
+                                                c_r.push(column_name);
+                                            };
+                                            Some(c_r)
+                                        }
+                                        else {
+                                            None
+                                        }
+                                    };
+                                    
+                                    // Obtain values (to insert for columns) from insert query (whole) // Error: When value coudn't be converted or vector with converted results is shorter then this from query values then loop is break inside brackets "{}" and further (below) code won't be performing as next
                                     let values_from_query = {
                                         // Type which store values for Query must be Values()
                                         if let SetExpr::Values(vals) = *source.body {
@@ -304,7 +320,8 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                                     };
 
                                     // Create table with new inserted records and save it
-                                    match process_sql(ProcessSQLSupportedQueries::Insert(dbt_path, None, values_from_query, op_type)) {
+                                    // When operation must be performed for specific columns then columns correcteness and whether that operation can be performed is check inside process_sql function -> because there exists deserialized JSON table
+                                    match process_sql(ProcessSQLSupportedQueries::Insert(dbt_path, columns_from_query, values_from_query, op_type)) {
                                         Ok(ready_table) => {
                                             // Put table into string
                                             let table_ready_stri_op = serde_json::to_string(&ready_table);
@@ -321,7 +338,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                                                 break Error(f!("Couldn't convert operation results to JSON format"));
                                             }
                                         },
-                                        Err(_) => {println!("Here"); break Error(f!("Values couldn't been inserted to table"))}
+                                        Err(_) => break Error(f!("Values couldn't been inserted to table"))
                                     }
                                 }
                                 else {

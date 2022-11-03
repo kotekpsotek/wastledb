@@ -1,7 +1,8 @@
 #![allow(unused)]
-use std::{fs, path::Path};
+use std::{fs, path::Path, collections::HashMap};
 
 use serde::{self, Deserialize, Serialize};
+use serde_json::Value;
 use sqlparser::{
     self,
     ast::{ColumnOption, ColumnOptionDef, DataType, Statement},
@@ -98,7 +99,7 @@ pub struct JsonSQLTableColumn {
 /// Represent each row with data for "JsonSQLTable" struct
 pub struct JsonSQLTableColumnRow {
     pub col: String,
-    pub value: String,
+    pub value: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -124,7 +125,7 @@ pub enum ProcessSQLSupportedQueries<'x> {
         Option<ActionOnlyForTheseColumns>,
         Vec<RowsToProcess>,
         InsertOperations
-    ), // 1. Table name, 2. Optional: Insert only for specified here column names, 3. List with rows values (which will be attached)
+    ), // 1. Table name, 2. Optional: Insert only for specified here column names, 3. List with rows values (which will be attached), 4. Operation type
     CreateTable(
         TableName,
         Vec<(
@@ -195,7 +196,6 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
         }
         Insert(table_path, columns, rows, op_type) => {
             // TODO: Add support for When column type is different then this inffered for query collumn but format of value should be supported like between: "Varchar" and "TEXT" type
-            // TODO: Add support for columns operation
             // TODO: Add support for constraints (e.g: When column has got NOT NULL then it must have got assigned value durning INSERT operation)
             // TODO: Add support for autoindexing
 
@@ -218,14 +218,119 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                 let db_table_columns = &table_json.columns;
                 let db_table_rows = &mut table_json.rows;
 
+                // When columns to which values should be inserted were attached then check whether addition for specific columns can be performed
+                // When columns weren't attached then ignore this code block
+                let mut existing_columns_to_perform_list: std::collections::HashMap<String, JsonSQLTableColumn> = HashMap::new();
+                let mut existing_columns_to_perform: Vec<String> = vec![];
+                let mut columns_not_included_in_query: Vec<&JsonSQLTableColumn> = vec![];
+                if columns.is_some() {
+                    let columns = columns.clone().unwrap();
+                    
+                    // check whether all columns given into query exists and put this column into Vector
+                    for column_perf_for in &columns {
+                        let databse_has_column = db_table_columns
+                            .iter()
+                            .enumerate()
+                            .any(|val| {
+                                if &val.1.name == column_perf_for {
+                                    true
+                                }
+                                else {
+                                    false
+                                }
+                            });
+                        
+                        if databse_has_column {
+                            let column = db_table_columns
+                                .iter()
+                                .find(|col| {
+                                    if &col.name == column_perf_for {
+                                        return true
+                                    };
+                                    
+                                    false
+                                });
+                            
+                            if let Some(col) = column {
+                                existing_columns_to_perform.push(column_perf_for.clone());
+                                existing_columns_to_perform_list.insert(column_perf_for.clone(), col.clone());
+                            }
+                            else {
+                                break;
+                            }
+                        }
+                        else {
+                            break;
+                        };
+                    };
+
+                    // Go further only when all columns from query exists in table and below checking has been done to advantage of "perform further"
+                    // When all is correct after check then perform further, else return Err(())
+                    if existing_columns_to_perform.len() == columns.len() {
+                        // Check whether remained column doesn't have constraints "not null"
+                            // ... obtain all reamained columns + assign it to scope range variable
+                        columns_not_included_in_query = db_table_columns.
+                            iter()
+                            .filter(|column| {
+                                if !existing_columns_to_perform.contains(&column.name) {
+                                    true
+                                }
+                                else {
+                                    false
+                                }
+                            })
+                            .collect::<Vec<&JsonSQLTableColumn>>();
+                        
+                            // ... Check whether all remained columns so (these "not included in query") not inclueded constraint "NOT NULL" (when not includes then result is "true")
+                        let all_remained_dn_null = columns_not_included_in_query // indicate whether all columns doesn't have NOT_NULL constraint
+                            .iter()
+                            .all(|remained_column| {
+                                if let Some(constraints_vec) = &remained_column.constraints {
+                                    match &remained_column.constraints {
+                                        Some(constraints_vec) => {
+                                            // When vector is empty that NOT_NULL constraint doesn't exists so return "false"
+                                            if constraints_vec.len() > 0 {
+                                                // Check whether in vector with constraints is any NOT_NULL constraint (when is return "false" when is that constraint (from this reason "not" operator begin statement!))
+                                                constraints_vec
+                                                    .iter()
+                                                    .any(|constraint| {
+                                                        match constraint.clone() {
+                                                            SupportedSQLColumnConstraints::NOT_NULL => false,
+                                                            _ => true
+                                                        }
+                                                    })
+                                            }
+                                            else {
+                                                true
+                                            }
+                                        },
+                                        None => true
+                                    }
+                                }
+                                else {
+                                    true
+                                }
+                            });
+
+                        // When some from remained column contains NOT_NULL constraiint then return Err(()) 
+                        if !all_remained_dn_null { 
+                            return Err(());
+                        }
+                        // else ... Go further and perform addition
+                    }
+                    else {
+                        return Err(());
+                    }
+                }
+
                 // Ready rows to insert into table
                 let mut ready_rows = Vec::new() as Vec<Vec<JsonSQLTableColumnRow>>;
 
                 // Iterate over each row with data to insert into table columns
                 for row in rows {
-                    // Without specified "columns" property number of columns in row must be equal to database column list
-                    if db_table_columns.len() == row.len() {
-                        // Collection with ready values to insert into table with rows. TODO: Must be checked when insert operation is processing for specific columns on angle of correct with constarints
+                    // Always no matter upon operation type columns len must be equal to list of values in row 
+                    if db_table_columns.len() == row.len() || (columns.is_some() && row.len() == columns.clone().unwrap().len()) {
+                        // Collection with ready values to insert into table with rows
                         let mut ready_row_values = Vec::new() as Vec<JsonSQLTableColumnRow>;
 
                         // Iterate over values to insert from one row to insert
@@ -233,7 +338,30 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                         let mut it_num: usize = 0;
                         while it_num < row_len {
                             let row_value = &row[it_num];
-                            let column_for_row_value = &db_table_columns[it_num];
+                            let column_for_row_value = {
+                                if columns.is_none() { // column for normal addition
+                                    if db_table_columns.len() > it_num {
+                                        &db_table_columns[it_num]
+                                    }
+                                    else {
+                                        break;
+                                    }
+                                }
+                                else { // column for addition for specific columns
+                                    if existing_columns_to_perform.len() > it_num {
+                                        // Because columns len must be equal to len of values in row so always Some(val)
+                                        if let Some(val) = existing_columns_to_perform_list.get(&existing_columns_to_perform[it_num]) {
+                                            val
+                                        }
+                                        else {
+                                            break;
+                                        }
+                                    }
+                                    else {
+                                        break;
+                                    }
+                                }
+                            };
 
                             // IMPORTANT: Check types correcteness ... type must be the same as column type // + add to match!() all datatype enum tuple memebers
                             if column_for_row_value.d_type == row_value.1
@@ -269,13 +397,30 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                 };
 
                                 // Create ready to insert, to table value for column
-                                // Insert only when attached value has got type correct with column datatype
+                                // For whole columns insert: Insert only when attached value has got type correct with column datatype
+                                // For insert for specific columns: Insert value for specific column and full fill remained columns with values null
                                 if allow_to_add {
+                                    // insert normal value
                                     let new_value = JsonSQLTableColumnRow {
                                         col: column_for_row_value.name.clone(),
-                                        value: row_value.0.clone(),
+                                        value: Some(row_value.0.clone()),
                                     };
                                     ready_row_values.push(new_value);
+
+                                    // Add to row values for remained columns with attached "null" as a value
+                                    // below instruction ignore type safeguards ("null" -> can be attached to all keys which doesn't have got NOT_NULL constraint)
+                                    if it_num == row_len - 1 && columns.is_some() {
+                                        let mut remained_row_values = vec![] as Vec<JsonSQLTableColumnRow>;
+
+                                        for colmn_out_from_query in &columns_not_included_in_query {
+                                            let remained_row_value = JsonSQLTableColumnRow {
+                                                col: colmn_out_from_query.name.to_owned(),
+                                                value: None
+                                            };
+                                            remained_row_values.push(remained_row_value);
+                                        };
+                                        ready_row_values.extend(remained_row_values);
+                                    };
                                 } else {
                                     break;
                                 }
