@@ -5,8 +5,8 @@ use format as f;
 use Outcomes::*;
 use std::{ fs, path::Path, collections::HashMap };
 
-use crate::{connection::tcp::{ CommandTypeKeyDiff, SessionData }, management::sql_json::{self, ProcessSQLSupportedQueries}};
-use crate::management::sql_json::{ process_sql, ProcessSQLRowField as Field, SupportedSQLDataTypes, SupportedSQLColumnConstraints, ConvertSQLParserTypesToSupported, ConvertSQLParserOptionsToSupportedConstraints };
+use crate::connection::tcp::{ CommandTypeKeyDiff, SessionData };
+use crate::management::sql_json::{ self, process_sql, ProcessSQLRowField as Field, SupportedSQLDataTypes, SupportedSQLColumnConstraints, ProcessSQLSupportedQueries, InsertOperations, ConvertSQLParserTypesToSupported, ConvertSQLParserOptionsToSupportedConstraints };
 use self::additions::unavailable;
 
 #[path ="../additions"]
@@ -204,7 +204,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                         into, 
                         table_name, 
                         columns: _, // TODO: Add later support for attachement for specific columns
-                        overwrite: _,  // TODO: In fetaure add support for INSER OVERWRITE TABLE 'table_name' (now this query works as INSERT INTO).
+                        overwrite,
                         source, 
                         partitioned: _, 
                         after_columns: _, 
@@ -214,102 +214,123 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                         let session_data = serde_json::from_str::<SessionData>(sessions.get(&session_id).unwrap()).unwrap();
                         let user_con_db = session_data.connected_to_database.clone();
                         
-                        if into && user_con_db.is_some() { // user must be firsly connected to database
-                            // Obtain table name
-                            let table_name = &table_name.0[0].value;
-
-                            // Obtain database name to which user is connected
-                            let user_con_db = session_data.connected_to_database.unwrap();
+                        if user_con_db.is_some() { // user must be firsly connected to database
+                            // Support for both operations types "INSERT INTO" and "INSERT OVERWRITE TABLE"
+                            let op_type: Option<InsertOperations> = {
+                                if into {
+                                    Some(InsertOperations::Into)
+                                }
+                                else if overwrite {
+                                    Some(InsertOperations::Overwrite)
+                                }
+                                else {
+                                    None
+                                }
+                            };
                             
-                            // Db path
-                            let db_path_s = f!("../source/dbs/{}", user_con_db);
-                            let db_path = Path::new(&db_path_s);
+                                // ...rust required safeguards for support only 2 insert operations
+                            if op_type.is_some() {
+                                let op_type = op_type.unwrap();
 
-                            // Db table path
-                            let dbt_path_s = f!("{db_loc}/{table}.json", db_loc = db_path_s, table = table_name);
-                            let dbt_path = Path::new(&dbt_path_s);
+                                // Obtain table name
+                                let table_name = &table_name.0[0].value;
 
-                            // Create only when database and tab;e exists
-                            if db_path.exists() && dbt_path.exists() {
-                                // Obtain values (to insert for columns) from insert query (whole)
-                                let values_from_query = {
-                                    // Type which store values for Query must be Values()
-                                    if let SetExpr::Values(vals) = *source.body {
-                                        let vals = vals.0;
-                                        // Ready to insert: List with all rows and it's values to insert
-                                        let mut allrows_values_list: Vec<Vec<Field>> = vec![]; // 1st vector = store rows, 2nd vector = store values for columns for single row
-                                    
-                                        // Iterte over each row with values to insert for each column
-                                        for each_row in vals.clone() {
-                                            let mut onerow_values_list: Vec<Field> = vec![];
+                                // Obtain database name to which user is connected
+                                let user_con_db = session_data.connected_to_database.unwrap();
+                                
+                                // Db path
+                                let db_path_s = f!("../source/dbs/{}", user_con_db);
+                                let db_path = Path::new(&db_path_s);
 
-                                            // Extract all values from query and assing it to appropriate type supported by this database or break whole extract operation when some type from query isn't supported by this database
-                                            // Iterate over values from one row and extract values (extract in this "scenario" obtain value and it type from query and assign it to datatype supported by this database). When datatype from query isn't supported then whole (insert) operation will be stopped and not performed
-                                            for val_ins in &each_row {
-                                                if let Expr::Value(dat_type) = val_ins {
-                                                    use sqlparser::ast::Value::*; // get types for query (required to assign)
-                                                    use sql_json::SupportedSQLDataTypes as sup; // get supported types list
-                                                
-                                                    // extract types and assign their values to supported datatypes / or stop loop over row values when some type isn't supported
-                                                    match dat_type {
-                                                        SingleQuotedString(str) | DoubleQuotedString(str) => onerow_values_list.push(Field(str.into(), sup::VARCHAR(None))), // string are interpreted as "TEXT" (up to 16_777_215 characters iin one column) type in this place but also can be VARCHAR (which support to 65_535 characters in one string)
-                                                        Null => onerow_values_list.push(Field("null".to_string(), sup::NULL)),
-                                                        Boolean(val) => onerow_values_list.push(Field(val.to_string(), sup::BOOLEAN)),
-                                                        Number(num, _) => onerow_values_list.push(Field(num.into(), sup::INT)),
-                                                        _ => break // for unsuported data types
+                                // Db table path
+                                let dbt_path_s = f!("{db_loc}/{table}.json", db_loc = db_path_s, table = table_name);
+                                let dbt_path = Path::new(&dbt_path_s);
+
+                                // Create only when database and tab;e exists
+                                if db_path.exists() && dbt_path.exists() {
+                                    // Obtain values (to insert for columns) from insert query (whole)
+                                    let values_from_query = {
+                                        // Type which store values for Query must be Values()
+                                        if let SetExpr::Values(vals) = *source.body {
+                                            let vals = vals.0;
+                                            // Ready to insert: List with all rows and it's values to insert
+                                            let mut allrows_values_list: Vec<Vec<Field>> = vec![]; // 1st vector = store rows, 2nd vector = store values for columns for single row
+                                        
+                                            // Iterte over each row with values to insert for each column
+                                            for each_row in vals.clone() {
+                                                let mut onerow_values_list: Vec<Field> = vec![];
+
+                                                // Extract all values from query and assing it to appropriate type supported by this database or break whole extract operation when some type from query isn't supported by this database
+                                                // Iterate over values from one row and extract values (extract in this "scenario" obtain value and it type from query and assign it to datatype supported by this database). When datatype from query isn't supported then whole (insert) operation will be stopped and not performed
+                                                for val_ins in &each_row {
+                                                    if let Expr::Value(dat_type) = val_ins {
+                                                        use sqlparser::ast::Value::*; // get types for query (required to assign)
+                                                        use sql_json::SupportedSQLDataTypes as sup; // get supported types list
+                                                    
+                                                        // extract types and assign their values to supported datatypes / or stop loop over row values when some type isn't supported
+                                                        match dat_type {
+                                                            SingleQuotedString(str) | DoubleQuotedString(str) => onerow_values_list.push(Field(str.into(), sup::VARCHAR(None))), // string are interpreted as "TEXT" (up to 16_777_215 characters iin one column) type in this place but also can be VARCHAR (which support to 65_535 characters in one string)
+                                                            Null => onerow_values_list.push(Field("null".to_string(), sup::NULL)),
+                                                            Boolean(val) => onerow_values_list.push(Field(val.to_string(), sup::BOOLEAN)),
+                                                            Number(num, _) => onerow_values_list.push(Field(num.into(), sup::INT)),
+                                                            _ => break // for unsuported data types
+                                                        }
                                                     }
+                                                    else {
+                                                        break;
+                                                    };
+                                                };
+                                            
+                                                // ACID rules must be fullfiled so: (...to perform query all types must be correctly extracted so (extracted_values_from_row_stored.len() == query_row_values.len()) otheriwise don't perform any slice of whole query to maintain data consistancy and break loop here)
+                                                if onerow_values_list.len() == each_row.len() {
+                                                    allrows_values_list.push(onerow_values_list);
                                                 }
                                                 else {
                                                     break;
                                                 };
                                             };
                                         
-                                            // ACID rules must be fullfiled so: (...to perform query all types must be correctly extracted so (extracted_values_from_row_stored.len() == query_row_values.len()) otheriwise don't perform any slice of whole query to maintain data consistancy and break loop here)
-                                            if onerow_values_list.len() == each_row.len() {
-                                                allrows_values_list.push(onerow_values_list);
+                                            // ACID principles must be fullfiled so ...rows_query.len() must be equal rows_with_converted_values.len() otherwise operation won't be performed
+                                            if allrows_values_list.len() == vals.len() {
+                                                allrows_values_list
                                             }
                                             else {
-                                                break;
-                                            };
-                                        };
-                                    
-                                        // ACID principles must be fullfiled so ...rows_query.len() must be equal rows_with_converted_values.len() otherwise operation won't be performed
-                                        if allrows_values_list.len() == vals.len() {
-                                            allrows_values_list
+                                                break Error(f!(r#"Some type from your "INSERT" query isn't supported, from this plaintiff whole operation can't be perfomed"#));
+                                            }
                                         }
                                         else {
-                                            break Error(f!(r#"Some type from your "INSERT" query isn't supported, from this plaintiff whole operation can't be perfomed"#));
+                                            break Error(f!("Query couldn't be executed"));
                                         }
-                                    }
-                                    else {
-                                        break Error(f!("Query couldn't be executed"));
-                                    }
-                                };
+                                    };
 
-                                // Create table with new inserted records and save it
-                                match process_sql(ProcessSQLSupportedQueries::Insert(dbt_path, None, values_from_query)) {
-                                    Ok(ready_table) => {
-                                        // Put table into string
-                                        let table_ready_stri_op = serde_json::to_string(&ready_table);
-                                        if let Ok(table_ready_stri) = table_ready_stri_op {
-                                            // Save result into table file + return operation result
-                                            if let Ok(_) = fs::write(dbt_path, table_ready_stri) {
-                                                break Success(Some(f!(r#"INSERT operation has been performed"#)));
+                                    // Create table with new inserted records and save it
+                                    match process_sql(ProcessSQLSupportedQueries::Insert(dbt_path, None, values_from_query, op_type)) {
+                                        Ok(ready_table) => {
+                                            // Put table into string
+                                            let table_ready_stri_op = serde_json::to_string(&ready_table);
+                                            if let Ok(table_ready_stri) = table_ready_stri_op {
+                                                // Save result into table file + return operation result
+                                                if let Ok(_) = fs::write(dbt_path, table_ready_stri) {
+                                                    break Success(Some(f!(r#"INSERT operation has been performed"#)));
+                                                }
+                                                else {
+                                                    break Error(f!("Coludn't save results of operation from some reason"));
+                                                }
                                             }
                                             else {
-                                                break Error(f!("Coludn't save results of operation from some reason"));
+                                                break Error(f!("Couldn't convert operation results to JSON format"));
                                             }
-                                        }
-                                        else {
-                                            break Error(f!("Couldn't convert operation results to JSON format"));
-                                        }
-                                    },
-                                    Err(_) => {println!("Here"); break Error(f!("Values couldn't been inserted to table"))}
+                                        },
+                                        Err(_) => {println!("Here"); break Error(f!("Values couldn't been inserted to table"))}
+                                    }
+                                }
+                                else {
+                                    break Error(f!("Database to which you're connected doesn't exists | Or table to which you try attach data doesn't exists in database to which you're connected"));
                                 }
                             }
                             else {
-                                break Error(f!("Database to which you're connected doesn't exists | Or table to which you try attach data doesn't exists in database to which you're connected"));
-                            }
+                                break Error(f!("This \"INSERT\" operation isn't supported"));
+                            };
                         }
                         else {
                             break Error(f!("\"INSERT\" query must include \"INTO\""));

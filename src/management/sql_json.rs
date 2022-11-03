@@ -111,11 +111,19 @@ type ActionOnlyForTheseColumns = Vec<String>;
 type RowsToProcess = Vec<ProcessSQLRowField>;
 
 #[derive(Debug)]
+/// Includes all "INSERT" operation mutations 
+pub enum InsertOperations {
+    Into,
+    Overwrite
+}
+
+#[derive(Debug)]
 pub enum ProcessSQLSupportedQueries<'x> {
     Insert(
         TablePath<'x>,
         Option<ActionOnlyForTheseColumns>,
         Vec<RowsToProcess>,
+        InsertOperations
     ), // 1. Table name, 2. Optional: Insert only for specified here column names, 3. List with rows values (which will be attached)
     CreateTable(
         TableName,
@@ -127,8 +135,7 @@ pub enum ProcessSQLSupportedQueries<'x> {
     ), // 1. Table name, 2. Vector with table columns and characteristic for each column
 }
 
-// TODO: Change description
-/// Processing attached SQL query and returns its result as "JsonSQLTable" type ready to serialize to json format thanks to "serde" and "serde_json" crates
+/// Processing attached SQL query and returns its result as "JsonSQLTable" type ready to serialize, to json format thanks to "serde" and "serde_json" crates
 /// When something went bad durning analyze or processing sql query then Error without any description is returned
 // Note: Polish characters are not supported by sqlparser, so not use them into queries
 #[must_use = "In order to assure the best level of relaibility"]
@@ -185,7 +192,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                 Err(())
             }
         }
-        Insert(table_path, columns, rows) => {
+        Insert(table_path, columns, rows, op_type) => {
             // TODO: Add support for When column type is different then this inffered for query collumn but format of value should be supported like between: "Varchar" and "TEXT" type
             // TODO: Add support for columns operation
             // TODO: Add support for constraints (e.g: When column has got NOT NULL then it must have got assigned value durning INSERT operation)
@@ -210,6 +217,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                 let db_table_columns = &table_json.columns;
                 let db_table_rows = &mut table_json.rows;
 
+                // Ready rows to insert into table
                 let mut ready_rows = Vec::new() as Vec<Vec<JsonSQLTableColumnRow>>;
 
                 // Iterate over each row with data to insert into table columns
@@ -288,6 +296,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                 if db_table_rows.is_some()
                     && ready_rows.len() > 0
                     && ready_rows[0].len() == db_table_columns.len()
+                    && matches!(op_type, InsertOperations::Into)
                 {
                     // When already table has got saved rows
                     // ... assign to table new rows
@@ -299,8 +308,8 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
 
                     //... return table in json format as a result of `INSERT` operation + stop loop
                     return Ok(table_json);
-                } else if db_table_rows.is_none() && ready_rows.len() > 0 {
-                    // When table hasn't got already any saved rows
+                } else if (db_table_rows.is_none() && ready_rows.len() > 0) || (matches!(op_type, InsertOperations::Overwrite) && ready_rows.len() > 0) {
+                    // When table hasn't got already any saved rows or INSERT OPERATION has been characterized as "INSERT OVERWRITE TABLE"
                     //... assign to table new rows
                     table_json.rows = Some(ready_rows);
 

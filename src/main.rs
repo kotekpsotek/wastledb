@@ -155,7 +155,11 @@ mod tests {
 
             //... Request 
             // Remained options (not used in sended query) (with separators): 1-1 connect_auto|x=x|true
-        connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|INSERT INTO "mycat" VALUES ('kotek', 'male', 11);"#, sess_id).as_bytes()).unwrap();
+                // ... Operation: INSERT INTO    
+        // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|INSERT INTO "mycat" VALUES ('kika', 'male', 1);"#, sess_id).as_bytes()).unwrap();
+                // ... Opeartion: INSERT OVERWRITE TABLE
+        connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|INSERT OVERWRITE TABLE "mycat" VALUES ('manull', 'female', 22);"#, sess_id).as_bytes()).unwrap();
+                // ... Operation: CREATE TABLE
         // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|CREATE TABLE mycat (name varchar(255) NOT NULL, gender text NOT NULL, plum int)"#, sess_id).as_bytes()).unwrap();
 
             //... Response
