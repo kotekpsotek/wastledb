@@ -336,6 +336,51 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                             break Error(f!("\"INSERT\" query must include \"INTO\""));
                         }
                     },
+                    Statement::Truncate { 
+                        table_name, 
+                        partitions: _ 
+                    } => {
+                        let session_data = serde_json::from_str::<SessionData>(sessions.get(&session_id).unwrap()).unwrap();
+                        let user_con_db = session_data.connected_to_database.clone();
+
+                        if user_con_db.is_some() {
+                            let user_con_db = user_con_db.unwrap();
+                            
+                            // Truncate table rows operation
+                            let table_name = &table_name.0[0].value;
+                            let table_path_str = f!("../source/dbs/{db_name}/{table_name}.json", db_name = user_con_db, table_name = table_name);
+                            let table_path = Path::new(&table_path_str);
+
+                            // Perform operation only when table exists into specified database
+                            if table_path.exists() {
+                                // Begin truncate operation and its results
+                                match process_sql(ProcessSQLSupportedQueries::Truncate(table_path)) {
+                                    Ok(tr_table) => {
+                                        // serialize table to String
+                                        let ready_table = {
+                                            if let Ok(table_str) = serde_json::to_string(&tr_table) {
+                                                table_str
+                                            }
+                                            else {
+                                                break Error(f!("Coludn't truncate table"));
+                                            }
+                                        };
+
+                                        // Save truncated table to file
+                                        match fs::write(table_path, ready_table) {
+                                            Ok(_) => break Success(None),
+                                            Err(_) => break Error(f!("Durning operation table begin stop existing"))
+                                        }
+                                    },
+                                    Err(_) => break Error(f!("Coludn't truncate table"))
+                                }
+                            }
+                            else {
+                                println!("i"); 
+                                break Error(f!("Entered table doesn't exist within Database"));
+                            }
+                        }
+                    },
                     _ => {
                         if parse_op_result.len() > it {
                             continue;

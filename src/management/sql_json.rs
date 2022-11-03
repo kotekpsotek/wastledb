@@ -133,6 +133,7 @@ pub enum ProcessSQLSupportedQueries<'x> {
             Option<Vec<SupportedSQLColumnConstraints>>,
         )>,
     ), // 1. Table name, 2. Vector with table columns and characteristic for each column
+    Truncate(TablePath<'x>)
 }
 
 /// Processing attached SQL query and returns its result as "JsonSQLTable" type ready to serialize, to json format thanks to "serde" and "serde_json" crates
@@ -320,6 +321,25 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                 return Err(()); // otherwise (but not used)
             } else {
                 return Err(());
+            }
+        },
+        Truncate(table_path) => {
+            // To perform whole operation: specified table must exists, table must be in JSON format before serialization. Else "Err(())" is returned
+            // Check whether path exists isn't perform here!
+            if let Ok(table_str) = fs::read_to_string(table_path) {
+                let table_json = serde_json::from_str::<JsonSQLTable>(&table_str);
+                if table_json.is_ok() {
+                    let mut table_json = table_json.unwrap();
+                    table_json.rows = None;
+                    
+                    Ok(table_json)
+                }
+                else {
+                    Err(())
+                }
+            }
+            else {
+                Err(())
             }
         }
     }
