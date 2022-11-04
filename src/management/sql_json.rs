@@ -1,5 +1,5 @@
 #![allow(unused)]
-use std::{fs, path::Path, collections::HashMap};
+use std::{fs, path::{Path, PathBuf}, collections::HashMap};
 
 use serde::{self, Deserialize, Serialize};
 use serde_json::Value;
@@ -106,7 +106,7 @@ pub struct JsonSQLTableColumnRow {
 pub struct ProcessSQLRowField(pub String, pub SupportedSQLDataTypes); // 1. field value, 2. Field data type (only supported datatypes)
 
 type TableName = String;
-type TablePath<'s> = &'s Path;
+type TablePath<'x> = &'x PathBuf;
 type ColumnName = String;
 type ActionOnlyForTheseColumns = Vec<String>;
 type RowsToProcess = Vec<ProcessSQLRowField>;
@@ -143,7 +143,7 @@ pub enum ProcessSQLSupportedQueries<'x> {
 #[must_use = "In order to assure the best level of relaibility"]
 pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTable, ()> {
     use ProcessSQLSupportedQueries::*;
-    match sql_action {
+    match sql_action { // only operations which require changes/obtain data/mainupulate file content in any manner
         CreateTable(table_name, columns) => {
             if columns.len() > 0 { // can be treat as boilerplate but i feel safier with this statement
                 let mut ready_columns: Vec<JsonSQLTableColumn> = vec![];
@@ -198,6 +198,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
             // TODO: Add support for When column type is different then this inffered for query collumn but format of value should be supported like between: "Varchar" and "TEXT" type
             // TODO: Add support for constraints (e.g: When column has got NOT NULL then it must have got assigned value durning INSERT operation)
             // TODO: Add support for autoindexing
+            // TODO: Better system to checking types inside this method (number can't be asigned to string)
 
             // To perform operation must be minimum one row with inserted data
             if rows.len() > 0 {
@@ -326,7 +327,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                 // Ready rows to insert into table
                 let mut ready_rows = Vec::new() as Vec<Vec<JsonSQLTableColumnRow>>;
 
-                // Iterate over each row with data to insert into table columns
+                // Iterate over each row with data to insert into table columns. Inside among others are checking row type correctensess respect to column type
                 for row in rows {
                     // Always no matter upon operation type columns len must be equal to list of values in row 
                     if db_table_columns.len() == row.len() || (columns.is_some() && row.len() == columns.clone().unwrap().len()) {
@@ -369,6 +370,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                     column_for_row_value.d_type,
                                     SupportedSQLDataTypes::VARCHAR(_)
                                 )
+                                || (column_for_row_value.d_type == SupportedSQLDataTypes::TEXT && matches!(row_value.1, SupportedSQLDataTypes::VARCHAR(_))) // "VARCHAR" should also be added to columns with "TEXT" type (because varchat capacity is smaller then TEXT)
                             {
                                 // Additional more sophisticated type checker for more complicated types
                                 // Initialy it is always "true" so operation can be performed but in moment when type isn't correct that is changing to "false"
@@ -431,7 +433,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                             it_num += 1;
                         }
 
-                        // Attach row to all rows list
+                        // Attach row to all rows list // TODO: Add checking
                         ready_rows.push(ready_row_values);
                     } else {
                         break;
@@ -454,7 +456,12 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
 
                     //... return table in json format as a result of `INSERT` operation + stop loop
                     return Ok(table_json);
-                } else if (db_table_rows.is_none() && ready_rows.len() > 0) || (matches!(op_type, InsertOperations::Overwrite) && ready_rows.len() > 0) {
+                } else if ready_rows.len() > 0
+                    && ready_rows[0].len() == db_table_columns.len() 
+                    && ((db_table_rows.is_none() && ready_rows.len() > 0) 
+                        || (matches!(op_type, InsertOperations::Overwrite) && ready_rows.len() > 0)) 
+                {
+                    println!("i");
                     // When table hasn't got already any saved rows or INSERT OPERATION has been characterized as "INSERT OVERWRITE TABLE"
                     //... assign to table new rows
                     table_json.rows = Some(ready_rows);
@@ -463,7 +470,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                     return Ok(table_json);
                 }
 
-                return Err(()); // otherwise (but not used)
+                return Err(()); // otherwise (is returned for example when "ready_rows.len() != db_table_columns.len()" which occurs when row type isn't equal to type specified for column)
             } else {
                 return Err(());
             }

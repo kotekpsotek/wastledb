@@ -1,4 +1,4 @@
-use sqlparser::{ dialect::AnsiDialect, parser::Parser as SqlParser, ast::{Statement, ObjectName, SetExpr, Expr, DataType, ColumnOptionDef} };
+use sqlparser::{ dialect::AnsiDialect, parser::Parser as SqlParser, ast::{Statement, ObjectName, SetExpr, Expr, DataType, ColumnOptionDef, ObjectType} };
 #[allow(unused)]
 use datafusion::prelude::*;
 use format as f;
@@ -23,6 +23,22 @@ pub enum Outcomes {
     Success(Option<String>) // 1. Optional description
 }
 
+/// Obtain information whether user is connected to database and database name when is
+fn get_database_user_connected_to(sessions: &mut HashMap<String, String>, session_id: &String) -> Option<String> {
+    let session_data = serde_json::from_str::<SessionData>(sessions.get(session_id).unwrap()).unwrap();
+    let user_con_db = session_data.connected_to_database.clone();
+
+    return user_con_db;
+}
+
+/// Get path (struct PathBuf) to table located into database
+fn get_dbtable_path(db_name: &String, table_name: &String) -> std::path::PathBuf {
+    let table_path_str = f!("../source/dbs/{0}/{1}.json", db_name, table_name);
+    let table_path = Path::new(&table_path_str).to_owned();
+    return table_path;
+}
+
+/// Process sended sql query
 pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::CommandTypeKeyDiff>, session_id: String, sessions: &mut HashMap<String, String>) -> Outcomes {
     let sql_query = query;
     let selected_sql_dialect = AnsiDialect {};
@@ -103,10 +119,11 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                         on_commit: _, 
                         on_cluster: _ 
                     } => {
-                        let session_data = serde_json::from_str::<SessionData>(sessions.get(&session_id).unwrap()).unwrap();
+                        let session_data = get_database_user_connected_to(sessions, &session_id);
 
-                        if session_data.connected_to_database.is_some() {
-                            if Path::new(&f!("../source/dbs/{db}", db = session_data.connected_to_database.clone().unwrap())).exists() {
+                        if session_data.is_some() {
+                            let database_name = session_data.unwrap();
+                            if Path::new(&f!("../source/dbs/{db}", db = database_name)).exists() {
                                 // Obtain table name and put it into Option<String>
                                 let table_name = if name.0.len() > 0 {
                                     Some(&name.0[0].value)
@@ -117,9 +134,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
 
                                 // Table name must be attached in query!
                                 if let Some(table_name) = table_name {
-                                    let connection_db = session_data.connected_to_database.clone();
-                                    let f_p_s = f!("../source/dbs/{db}/{tb}.json", db = connection_db.unwrap(), tb = table_name);
-                                    let f_p = Path::new(&f_p_s);
+                                    let f_p = get_dbtable_path(&database_name, table_name);
 
                                     if !f_p.exists() {                                    
                                         // obtain column properties in order to allow create a table
@@ -237,17 +252,12 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
 
                                 // Obtain database name to which user is connected
                                 let user_con_db = session_data.connected_to_database.unwrap();
-                                
-                                // Db path
-                                let db_path_s = f!("../source/dbs/{}", user_con_db);
-                                let db_path = Path::new(&db_path_s);
 
                                 // Db table path
-                                let dbt_path_s = f!("{db_loc}/{table}.json", db_loc = db_path_s, table = table_name);
-                                let dbt_path = Path::new(&dbt_path_s);
+                                let dbt_path = get_dbtable_path(&user_con_db, table_name);
 
                                 // Create only when database and tab;e exists
-                                if db_path.exists() && dbt_path.exists() {
+                                if dbt_path.exists() {
                                     // Obtain for which coulmns operation must be performed only
                                     let columns_from_query = {
                                         // To return Some(_) columns len from lexer must be greater then 0 hence them must exists
@@ -321,7 +331,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
 
                                     // Create table with new inserted records and save it
                                     // When operation must be performed for specific columns then columns correcteness and whether that operation can be performed is check inside process_sql function -> because there exists deserialized JSON table
-                                    match process_sql(ProcessSQLSupportedQueries::Insert(dbt_path, columns_from_query, values_from_query, op_type)) {
+                                    match process_sql(ProcessSQLSupportedQueries::Insert(&dbt_path, columns_from_query, values_from_query, op_type)) {
                                         Ok(ready_table) => {
                                             // Put table into string
                                             let table_ready_stri_op = serde_json::to_string(&ready_table);
@@ -338,7 +348,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                                                 break Error(f!("Couldn't convert operation results to JSON format"));
                                             }
                                         },
-                                        Err(_) => break Error(f!("Values couldn't been inserted to table"))
+                                        Err(_) => {break Error(f!("Values couldn't been inserted to table"))}
                                     }
                                 }
                                 else {
@@ -357,21 +367,20 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                         table_name, 
                         partitions: _ 
                     } => {
-                        let session_data = serde_json::from_str::<SessionData>(sessions.get(&session_id).unwrap()).unwrap();
-                        let user_con_db = session_data.connected_to_database.clone();
+                        // Get whether user is connected to database and database name to which is
+                        let user_con_db = get_database_user_connected_to(sessions, &session_id);
 
                         if user_con_db.is_some() {
                             let user_con_db = user_con_db.unwrap();
                             
                             // Truncate table rows operation
                             let table_name = &table_name.0[0].value;
-                            let table_path_str = f!("../source/dbs/{db_name}/{table_name}.json", db_name = user_con_db, table_name = table_name);
-                            let table_path = Path::new(&table_path_str);
+                            let table_path = get_dbtable_path(&user_con_db, table_name);
 
                             // Perform operation only when table exists into specified database
                             if table_path.exists() {
                                 // Begin truncate operation and its results
-                                match process_sql(ProcessSQLSupportedQueries::Truncate(table_path)) {
+                                match process_sql(ProcessSQLSupportedQueries::Truncate(&table_path)) {
                                     Ok(tr_table) => {
                                         // serialize table to String
                                         let ready_table = {
@@ -393,11 +402,44 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                                 }
                             }
                             else {
-                                println!("i"); 
                                 break Error(f!("Entered table doesn't exist within Database"));
                             }
                         }
                     },
+                    Statement::Drop { // For both table and database but indicator on what unit operation should be performed is "object_type" property
+                        object_type, 
+                        if_exists:_, 
+                        names, 
+                        cascade: _, 
+                        restrict:_, 
+                        purge: _ 
+                    } => {
+                        let object_name = &(&(&names[0] as &ObjectName).0[0] as &sqlparser::ast::Ident).value;
+                        
+                        match object_type {
+                            ObjectType::Table => {
+                                let connected_to_database = get_database_user_connected_to(sessions, &session_id);
+
+                                if let Some(database) = connected_to_database {
+                                    let table_path = get_dbtable_path(&database, &object_name);
+                                    
+                                    if table_path.exists() {
+                                        match fs::remove_file(table_path) {
+                                            Ok(_) => break Success(None),
+                                            Err(_) => break Error(f!("Couldn't delete table"))
+                                        }
+                                    }
+                                    else {
+                                        break Error(f!("This table doesn't exists"));
+                                    }
+                                }
+                                else {
+                                    break Error(f!("To perform this operation you must be connected to database firstly!"));
+                                }
+                            },
+                            _ => break Error(f!("Couldn't perform operation"))
+                        }
+                    }
                     _ => {
                         if parse_op_result.len() > it {
                             continue;
