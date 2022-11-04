@@ -5,6 +5,7 @@ mod tui;
 #[path ="./login-system.rs"]
 mod login_system;
 mod inter;
+use tokio;
 
 use clap::{ Command, Arg, ArgAction };
 
@@ -12,7 +13,8 @@ mod management {
     pub mod sql_json;
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // tui::tui_create();
     let add_user = Command::new("database TUI interface")
         .about("Create new database user")
@@ -70,10 +72,10 @@ fn main() {
         }
     }
     else if let Some(_) = add_user.subcommand_matches("run") {
-        connection::tcp::handle_tcp();
+        connection::tcp::handle_tcp().await;
     }
     else {
-        connection::tcp::handle_tcp();
+        connection::tcp::handle_tcp().await;
     }
 }
 
@@ -156,7 +158,7 @@ mod tests {
             //... Request 
             // Remained options (not used in sended query) (with separators): 1-1 connect_auto|x=x|true
                 // ... Operation: INSERT INTO    
-        connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|INSERT INTO "mycat" VALUES ('male', 'kika', 1);"#, sess_id).as_bytes()).unwrap();
+        connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|INSERT OVERWRITE TABLE "mycat" ('gender', 'name') VALUES ('male', 'kika');"#, sess_id).as_bytes()).unwrap();
                 // ... Opeartion: INSERT OVERWRITE TABLE
         // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|INSERT OVERWRITE TABLE "mycat" VALUES ('cat', 'xx', '1');"#, sess_id).as_bytes()).unwrap();
                 // ... Operation: CREATE TABLE

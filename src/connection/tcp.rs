@@ -11,10 +11,12 @@ use {
     std::io::{ BufReader, BufRead },
     std::collections::HashMap,
     std::time::SystemTime,
-    std::path::Path
+    std::path::Path,
+    std::sync::{Arc, Mutex}
 };
 use login_system::authenticate_user;
 use uuid::{Uuid, timestamp};
+use tokio;
 use crate::inter;
 use management::main::Outcomes::*;
 
@@ -401,15 +403,44 @@ fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>
 }
 
 // "Call from outside to connect all chunks together"
-pub fn handle_tcp() {
+pub async fn handle_tcp() {
     let tcp_server_adress = format!("0.0.0.0:{port}", port = inter::TCP_PORT);
     let listener = TcpListener::bind(tcp_server_adress).expect("Couldn't spawn TCP Server on selected port!");
-    let mut sessions = HashMap::<String, String>::new(); // key - session id, data - session data in json format
+    let mut sessions = Arc::new(Mutex::new(HashMap::<String, String>::new())); // key - session id, data - session data in json format
 
+    // Sessions interval
+    tokio::spawn({
+        let ses = Arc::clone(&mut sessions);
+        async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await; // execute for every 10 seconds
+                let mut lc = ses.lock().unwrap();
+                println!("{:?}", lc);
+
+                // iterate over sessions timestamps
+                for entry in lc.clone().iter() {
+                    let s_d = serde_json::from_str::<SessionData>(entry.1).unwrap();
+                    let s_d_ct = s_d.timestamp;
+                    let timestamp_new = get_timestamp();
+
+                    if timestamp_new - s_d_ct > inter::MAXIMUM_SESSION_LIVE_TIME_MILS {
+                        lc.remove(entry.0);
+                    }
+                    else {
+                        println!("remained time to delete session: {}", inter::MAXIMUM_SESSION_LIVE_TIME_MILS - (timestamp_new - s_d_ct))
+                    }
+                }
+            }
+        }
+    });
+
+    // Tcp request
     for request in listener.incoming() {
         if let Ok(mut stream) = request {
             match handle_request(&mut stream) {
                 Ok(c_req) => {
+                    let mut sessions = sessions.lock().unwrap();
+                    
                     /* Do more... */
                     match process_request(c_req.clone(), Some(&mut sessions)) {
                         Ok(command_type) => {
@@ -441,6 +472,7 @@ pub fn handle_tcp() {
                                             Ok(ses_val) => {
                                                 // Add session value to sessions list
                                                 sessions.insert(uuid_gen.clone(), ses_val);
+                                                println!("{:#?}", sessions);
                                                 // println!("{:?}", sessions); // Test: print all sessions in list after add new session
 
                                                 // Send response

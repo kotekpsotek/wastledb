@@ -433,7 +433,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                             it_num += 1;
                         }
 
-                        // Attach row to all rows list // TODO: Add checking
+                        // Attach row to all rows list // Always great result
                         ready_rows.push(ready_row_values);
                     } else {
                         break;
