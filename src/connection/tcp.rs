@@ -230,7 +230,7 @@ impl CommandTypes {
                         let sql_query_key = self
                             .clone()
                             .parse_key_value(msg_body_sep[1]);
-                            // preseneted when user would like connect to database // this option always must be 3 in order
+                        // Using when user would like connect to database after create database using 'CREATE DATABASE database_name' SQL query // this option always must be 3 in order and value assigned to it must be "boolean"
                         let connect_auto = if msg_body_sep.len() >= 3 { // to pass this option must be presented prior 2 keys so: 1. session_id, 2. command (src)  
                             if let Some(CommandTypeKeyDiff { name, value }) = self.clone().parse_key_value(msg_body_sep[2]) {
                                 if name == "connect_auto" && vec!["true", "false"].contains(&value) {
@@ -253,13 +253,13 @@ impl CommandTypes {
                             None
                         };
 
-                            // exists when user would like connect with database
+                        // Process SQL query ... only when sql_query_key was correctly parsed prior
                         if let Some(CommandTypeKeyDiff { name, value }) = sql_query_key {
                             if name == "sql_query" && value.len() > 0 {
-                                // Extend session live time after call this command
+                                // Extend session live time after call this command (by emulate KeepAlive command manually)
                                 CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions));
 
-                                // Process query
+                                // Process query + return processing result outside this method
                                 let q_processed_r = self::management::main::process_query(value, connect_auto, session_id.into(), sessions);
                                 match q_processed_r {
                                     Success(desc_opt) => {
@@ -267,12 +267,11 @@ impl CommandTypes {
                                             return Ok(CommandTypes::CommandRes(desc))
                                         };
 
+                                        // outcome when from processing sql query function has been returned Success(None) (without content description)
                                         Ok(CommandTypes::CommandRes(format!("Query has been performed")))
                                     },
                                     Error(reason) => Err(ErrorResponseKinds::CouldntPerformQuery(reason))
                                 }
-
-                                // Correct query response
                             }
                             else {
                                 Err(ErrorResponseKinds::IncorrectRequest)
@@ -331,7 +330,7 @@ impl SessionHandler {
     
 } */
 
-// Callculate timestamp (how much milliseconds flow from 1 January 1970)
+// Callculate timestamp (how much milliseconds flow from 1 January 1970 to function invoke time)
 fn get_timestamp() -> u128 {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(dur) => dur.as_millis(),
@@ -415,7 +414,6 @@ pub async fn handle_tcp() {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await; // execute for every 10 seconds
                 let mut lc = ses.lock().unwrap();
-                println!("{:?}", lc);
 
                 // iterate over sessions timestamps
                 for entry in lc.clone().iter() {
@@ -425,9 +423,6 @@ pub async fn handle_tcp() {
 
                     if timestamp_new - s_d_ct > inter::MAXIMUM_SESSION_LIVE_TIME_MILS {
                         lc.remove(entry.0);
-                    }
-                    else {
-                        println!("remained time to delete session: {}", inter::MAXIMUM_SESSION_LIVE_TIME_MILS - (timestamp_new - s_d_ct))
                     }
                 }
             }
@@ -472,7 +467,6 @@ pub async fn handle_tcp() {
                                             Ok(ses_val) => {
                                                 // Add session value to sessions list
                                                 sessions.insert(uuid_gen.clone(), ses_val);
-                                                println!("{:#?}", sessions);
                                                 // println!("{:?}", sessions); // Test: print all sessions in list after add new session
 
                                                 // Send response
