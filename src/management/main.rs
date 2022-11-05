@@ -1,4 +1,4 @@
-use sqlparser::{ dialect::AnsiDialect, parser::Parser as SqlParser, ast::{Statement, ObjectName, SetExpr, Expr, DataType, ColumnOptionDef, ObjectType} };
+use sqlparser::{ dialect::AnsiDialect, parser::Parser as SqlParser, ast::{Statement, ObjectName, SetExpr, Expr, DataType, ColumnOptionDef, ObjectType, SelectItem, TableFactor} };
 #[allow(unused)]
 use datafusion::prelude::*;
 use format as f;
@@ -439,7 +439,117 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                             },
                             _ => break Error(f!("Couldn't perform operation"))
                         }
-                    }
+                    },
+                    Statement::Query(query) => {
+                        match *query.body {
+                            SetExpr::Select(select_query) => {
+                                if let Some(db) = get_database_user_connected_to(sessions, &session_id) {
+                                        // Extract data from parser SQL query
+                                    let sel_proj = { // SELECT filter ... -> (// Always Must be returned list containing string with speecific name or single "all" value // When error in identifing selection then return Error as operation result)
+                                        let sel_proj = select_query.projection;
+                                        if sel_proj.len() > 0 {
+                                            let mut result_proj = vec![] as Vec<String>;
+                                            for proj in &sel_proj {
+                                                match proj {
+                                                    SelectItem::Wildcard => { // select all result fields from record
+                                                        result_proj.push(String::from("all"));
+                                                        break;
+                                                    },
+                                                    SelectItem::UnnamedExpr(inside) => { // single attribute to display
+                                                        if let Expr::Identifier(indent) = inside.clone() {
+                                                            if indent.value.len() > 0 {
+                                                                result_proj.push(indent.value)
+                                                            }
+                                                            else {
+                                                                // Don't allow to empty field names
+                                                                break;
+                                                            }
+                                                        }
+                                                        else {
+                                                            break;
+                                                        }
+                                                    },
+                                                    _ => break
+                                                }
+                                            };
+
+                                            if result_proj.len() == sel_proj.len() {
+                                                result_proj
+                                            }
+                                            else {
+                                                break Error(f!("Incompatible projection values!"));
+                                            }
+                                        }
+                                        else {
+                                            break Error(f!("Incompatible projection values!"));
+                                        }
+                                    };
+                                    let sel_from_table = { // ... FROM "table_name" (// Benath is always not empty string as this representing table name, when something went wrong durning check then opeartion is break with returned "Error(reason_string)" outside)
+                                    let from = select_query.from;
+                                        // obtain single "table name"
+                                    if from.len() == 1 {
+                                        let from = &from[0].relation;
+                                        if let TableFactor::Table { name, alias: _, args: _, with_hints: _ } = from {
+                                                // Go ahead only when list with parsed table_names isn't empty
+                                            if name.0.len() > 0 {
+                                                let table_name = name.0[0].value.to_owned();
+                                                    // table name length must not be empty e.g: empty quotes "" or ''
+                                                if table_name.len() > 0 {
+                                                    table_name
+                                                }
+                                                else {
+                                                    break Error(f!("Table name doesn't fullfill requirements"));
+                                                }
+                                            }
+                                            else {
+                                                break Error(f!("Couldn't obtain table name"));
+                                            }
+                                        }
+                                        else {
+                                            break Error(f!("Couldn't obtain table name"));
+                                        }
+                                    }
+                                    else {
+                                        // Don't allow to add multiple tables to perf selection from
+                                        break Error(f!("Incompatible selection from format!"));
+                                    }
+                                    };
+                                    let sel_statements = select_query.selection; // WHERE ...
+
+                                    let table_path = get_dbtable_path(&db, &sel_from_table);
+                                    if table_path.exists() {
+                                        match process_sql(ProcessSQLSupportedQueries::Select(&table_path, sel_proj, sel_statements)) {
+                                            Ok(table_records) => {
+                                                    // Convert obtained record to JSON format and when serialization has been finalized with error return communicate otherwise obtained data in JSON format
+                                                let records_str = serde_json::to_string(&table_records.rows)
+                                                    .map_or_else(|_err| (false, String::new()), |suc| (true, suc));
+                                                
+                                                if records_str.0 {
+                                                    // Send to user only finded rows without table boilerplate
+                                                    // When rows are empty then send "null" as records result
+                                                    break Success(Some(records_str.1));
+                                                }
+                                                else {
+                                                    break Error(f!("Couldn't convert records to redable form"));
+                                                }
+                                            },
+                                            Err(_) => ()
+                                        }
+                                    }
+                                    else {
+                                        break Error(f!("Table given by you doesn't exists in database to which you're connected"));
+                                    }
+                                }
+                                else {
+                                    break Error(f!("You're not connected to database"));
+                                };
+
+                                // println!("\nExpr: {:?}\n\nTable name: {}", sel_proj, sel_from);
+                                break Success(None);
+                            },
+                            _ => break Error(f!("Not supported query"))
+                        };
+                    },
                     _ => {
                         if parse_op_result.len() > it {
                             continue;

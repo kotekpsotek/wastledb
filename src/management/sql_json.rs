@@ -5,7 +5,7 @@ use serde::{self, Deserialize, Serialize};
 use serde_json::Value;
 use sqlparser::{
     self,
-    ast::{ColumnOption, ColumnOptionDef, DataType, Statement},
+    ast::{ColumnOption, ColumnOptionDef, DataType, Statement, Expr},
 };
 use Statement::*;
 
@@ -108,8 +108,8 @@ pub struct ProcessSQLRowField(pub String, pub SupportedSQLDataTypes); // 1. fiel
 type TableName = String;
 type TablePath<'x> = &'x PathBuf;
 type ColumnName = String;
-type ActionOnlyForTheseColumns = Vec<String>;
-type RowsToProcess = Vec<ProcessSQLRowField>;
+type ActionOnlyForTheseColumns = Vec<ColumnName>;
+type RowsToProcess = Vec<ProcessSQLRowField>; 
 
 #[derive(Debug)]
 /// Includes all "INSERT" operation mutations 
@@ -134,7 +134,8 @@ pub enum ProcessSQLSupportedQueries<'x> {
             Option<Vec<SupportedSQLColumnConstraints>>,
         )>,
     ), // 1. Table name, 2. Vector with table columns and characteristic for each column
-    Truncate(TablePath<'x>)
+    Truncate(TablePath<'x>),
+    Select(TablePath<'x>, ActionOnlyForTheseColumns, Option<Expr>) // path to table, 2. return results for specific record tuples can be all, 3. Select only these records
 }
 
 /// Processing attached SQL query and returns its result as "JsonSQLTable" type ready to serialize, to json format thanks to "serde" and "serde_json" crates
@@ -488,6 +489,92 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                 }
                 else {
                     Err(())
+                }
+            }
+            else {
+                Err(())
+            }
+        },
+        Select(table_path, resulting_columns, conditions) => {
+            let table_data = fs::read_to_string(table_path).unwrap();
+            let mut json_t_data = serde_json::from_str::<JsonSQLTable>(&table_data).unwrap(); // I trust other Database functionalities to maintain correct JSON format
+            let t_d_rows = &json_t_data.rows; // WARNING: for simply access but not for assign values!!!
+
+            if conditions.is_none() {
+                if t_d_rows.is_some() {
+                    let t_d_rows = t_d_rows.as_ref().unwrap();
+                    if t_d_rows.len() > 0 {
+                        // Get whether user pass columns which are into table or pass "all" option (for return all columns)
+                        let table_col_names = json_t_data.columns.iter()
+                            .enumerate()
+                            .filter_map(|col| {
+                              Some(&col.1.name)
+                           })
+                            .collect::<Vec<&String>>();
+                        let user_pass_table_cols = resulting_columns.iter()
+                            .enumerate()
+                            .all(|col_to_ret| {
+                                let col_name = col_to_ret.1;
+                            
+                                if table_col_names.contains(&col_name) || col_name == &"all".to_string() {
+                                    return true;
+                                };
+
+                                false
+                            });
+
+                        // TODO: Make conditions given after 'WHERE' usable (if were putted)
+
+                            // Go ahead only when user pass table column names or "all" option
+                        if user_pass_table_cols {
+                            // Return only fields for columns which user would like to get
+                            if resulting_columns[0] == "all" {
+                                // Return all columns for matched records
+                                json_t_data.rows = Some(t_d_rows.to_owned());
+                                return Ok(json_t_data);
+                            }
+                            else {
+                                // Return only fields for columns which user would like to get 
+                                let mut f_results = vec![] as Vec<Vec<JsonSQLTableColumnRow>>;
+                                for row in t_d_rows.clone() {
+                                    let mut row_passed_fields_ready = vec![] as Vec<JsonSQLTableColumnRow>;
+                                    let _ = row
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|field| {
+                                            let f_d = field.1;
+
+                                            if resulting_columns.contains(&f_d.col) {
+                                                return true
+                                            };
+
+                                            return false
+                                        })
+                                        .collect::<Vec<(usize, &JsonSQLTableColumnRow)>>()
+                                        .into_iter()
+                                        .for_each(|record| {
+                                            row_passed_fields_ready.push(record.1.to_owned())
+                                        });
+                                    f_results.push(row_passed_fields_ready)
+                                }
+
+                                json_t_data.rows = Some(f_results);
+                                return Ok(json_t_data);
+                            }
+                        }
+                        else {
+                            return Err(())
+                        }
+                    }
+                    else {
+                        // Return table withput rows // with null benath "rows" key
+                        json_t_data.rows = None; // Return null for "rows" but not empty array. "serde_json" threat that as null in json file
+                        return Ok(json_t_data)
+                    }
+                }
+                else {
+                    // Return table withput rows // with null benath "rows" key
+                    return Ok(json_t_data)
                 }
             }
             else {
