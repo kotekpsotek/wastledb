@@ -510,10 +510,11 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
         Select(table_path, resulting_columns, conditions) => {
             let table_data = fs::read_to_string(table_path).unwrap();
             let mut json_t_data = serde_json::from_str::<JsonSQLTable>(&table_data).unwrap(); // I trust other Database functionalities to maintain correct JSON format
-            let t_d_rows = &json_t_data.rows; // WARNING: for simply access but not for assign values!!!
+            let mut t_d_rows = json_t_data.clone().rows; // WARNING: for simply access but not for assign values!!!
 
             if t_d_rows.is_some() {
-                let t_d_rows = t_d_rows.as_ref().unwrap();
+                let mut t_d_rows = t_d_rows.as_mut().unwrap();
+                    // ... Table must have some rows to go further
                 if t_d_rows.len() > 0 {
                     // Get whether user pass columns which are into table or pass "all" option (for return all columns)
                     let table_col_names = json_t_data.columns.iter()
@@ -535,7 +536,8 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                             false
                         });
 
-                    // TODO: Make conditions given after 'WHERE' usable (if were putted)
+                    //... Search results using conditions from 'WHERE'
+                        // TODO: system to prevent repeating same match when we use And concjustion with Or
                     if let Some(expr_conditions) = conditions {
                         // list with converted expressions from 'WHERE'
                         let mut operations_for_row: Vec<RowWhereOperation> = Vec::new(); // [{ column: Some("gender"), value: Some("male"), op: Eq }, { op: And, column: None, value: None }]
@@ -635,7 +637,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
     
                                 //... Comparing clousure // op: "Eq"/"Less" etc...
                                 let mut search_match_in_row = || {
-                                    for row in t_d_rows {
+                                    for row in &*t_d_rows {
                                         for row_vals in row {
                                             // Perform specific action abd add positive match result to results list
                                             match op_for_row.op {
@@ -661,8 +663,8 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                 // And/Or conditions pissed here
                                 if let BinaryOperator::And = op_for_row.op {
                                     if rm[it_op_id - 1].perf.is_some() && rm[it_op_id - 1].perf.unwrap() {
-                                        // lead operation further
-                                        search_match_in_row();
+                                        // Performed when: this condition is "And" condition and previous condition was correctly performed
+                                        () // Do nothing... Just go to next iteration (no "continue" statement (because it stop iterations counting hence next iteration will be reffering to this cycle so this made infinite loop))
                                     }
                                     else {
                                         // stop operation in for e.g in case like: previous search operation ends with "false" result because whatever row hasn't been matched to condition 
@@ -670,16 +672,30 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                         break; // stop operation further locally
                                     }
                                 }
+                                else if let BinaryOperator::Or = op_for_row.op {
+                                    () // Do nothing... Just go to next iteration (no "continue" statement (because it stop iterations counting hence next iteration will be reffering to this cycle so this made infinite loop))
+                                }
                                 else {
                                     // Lead further for other "op" types like Eq/Gt/Less etc...
                                     search_match_in_row();
 
                                     // When result hasn't been matched in any row by above clousure (enclosed in brackets "{}")
                                     if !match_found {
-                                        if let BinaryOperator::And = rm[it_op_id - 1].op {
-                                            op_performed_whole = false; // because all conditions between "AND" statement must results in match found (outcome "true")
+                                        if it_op_id > 0 && rm.len() > (it_op_id - 1) && rm[it_op_id - 1].op == BinaryOperator::And {
+                                            // Performed when: this condition hasn't been matched and previous condition was "And" conjuction condition
+                                            op_performed_whole = false;
+                                            break;
                                         }
-                                        // TODO: BinaryOperator::Or
+                                        else if rm.len() > (it_op_id + 1) && rm[it_op_id + 1].op != BinaryOperator::Or && rm[it_op_id].op != BinaryOperator::Or { // 
+                                            // Performed when: conditions length this condition hasn't been successfull matched and next conjuction condition isn't "Or" (like it's end condition)
+                                            op_performed_whole = false;
+                                            break;
+                                        }
+                                        else if rm.len() - 1 == it_op_id && (rm[it_op_id].op != BinaryOperator::Or && rm[it_op_id].op != BinaryOperator::And) {
+                                            // Performed when: this condition is last and this condition isn't conjuction condition: And, Or otherwise sql syntax error should be thrown
+                                            op_performed_whole = false;
+                                            break;
+                                        }
                                     }
                                 }
 
@@ -690,10 +706,20 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                 break;
                             }
                         };
-                        println!("{:#?} {}", s_rows, op_performed_whole);
+
+                        // Attach search results to next processing stage (only when where results has been found else return table without rows as a result of function)
+                        if s_rows.len() > 0 {
+                            t_d_rows.clear();
+                            t_d_rows.extend(s_rows);
+                        }
+                        else {
+                            json_t_data.rows = None;
+                            return Ok(json_t_data);
+                        };
                     }
 
-                        // Go ahead only when user pass table column names or "all" option
+                    // Go ahead only when user pass table column names or "all" option
+                    // Send to user only specified by him columns only when user pass these columns
                     if user_pass_table_cols {
                         // Return only fields for columns which user would like to get
                         if resulting_columns[0] == "all" {
