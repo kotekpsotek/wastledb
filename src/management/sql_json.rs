@@ -20,6 +20,20 @@ pub struct JsonSQLTable {
     pub rows: Option<Vec<Vec<JsonSQLTableColumnRow>>>,
 }
 
+impl JsonSQLTable {
+    fn get_column_type(&self, column_name: &String) -> Option<SupportedSQLDataTypes> {
+        let mut col_type = None as Option<SupportedSQLDataTypes>;
+        
+        for column in &self.columns {
+            if column.name == *column_name {
+                col_type = Some(column.d_type.clone())
+            }
+        };
+
+        col_type
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 /// Represent all supported SQL collumn types in this database
 pub enum SupportedSQLDataTypes {
@@ -508,6 +522,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
             }
         },
         Select(table_path, resulting_columns, conditions) => {
+            // When results aren't find then return table rows equal to "None"
             let table_data = fs::read_to_string(table_path).unwrap();
             let mut json_t_data = serde_json::from_str::<JsonSQLTable>(&table_data).unwrap(); // I trust other Database functionalities to maintain correct JSON format
             let mut t_d_rows = json_t_data.clone().rows; // WARNING: for simply access but not for assign values!!!
@@ -636,19 +651,90 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                 let mut match_found: bool = false;
     
                                 //... Comparing clousure // op: "Eq"/"Less" etc...
-                                let mut search_match_in_row = || {
+                                let mut search_match_in_row = |op_for_row: &mut RowWhereOperation| {
                                     for row in &*t_d_rows {
                                         for row_vals in row {
+                                            fn match_success(match_found: &mut bool, op_for_row: &mut RowWhereOperation, s_rows: &mut Vec<Vec<JsonSQLTableColumnRow>>, row: &Vec<JsonSQLTableColumnRow>) {
+                                                *match_found = true; // match is here so indicate other members about that
+                                                op_for_row.perf = Some(true); // indicate that operation has been successfull performed
+                                                s_rows.push(row.clone());
+                                            }
+
+                                            type Comparision = (bool, i128);
+                                            fn numeric_matches(json_t_data: &JsonSQLTable, sc_name: &Option<String>, sc_val: &Option<String>, row_vals: &JsonSQLTableColumnRow) -> (Option<SupportedSQLDataTypes>, Comparision, Comparision) {
+                                                let column_type = json_t_data.get_column_type(sc_name.as_ref().unwrap());  // column name always should be provided
+                                                let number_is_checker = sc_val.as_ref().map_or_else(|| (false, 0), |success| {
+                                                    let parse_op = success.parse::<i128>();
+                                                    match parse_op {
+                                                        Ok(num) => (true, num),
+                                                        Err(_) => (false, 0)
+                                                    }
+                                                });
+                                                let number_to_check = row_vals.value.as_ref().map_or_else(|| (false, 0), |success| {
+                                                    let parse_op = success.parse::<i128>();
+                                                    match parse_op {
+                                                        Ok(num) => (true, num),
+                                                        Err(_) => (false, 0)
+                                                    }
+                                                });
+
+                                                (column_type, number_is_checker, number_to_check)
+                                            }
+
                                             // Perform specific action abd add positive match result to results list
                                             match op_for_row.op {
-                                                BinaryOperator::Eq => {
+                                                BinaryOperator::Eq => { // values must be equal
                                                     if &row_vals.col == sc_name.as_ref().unwrap() && row_vals.value == sc_val {
-                                                        match_found = true; // match is here so indicate other members about that
-                                                        op_for_row.perf = Some(true); // indicate that operation has been successfull performed
-                                                        s_rows.push(row.clone());
+                                                        match_success(&mut match_found, &mut op_for_row.clone(), &mut s_rows, row);
                                                         break;
                                                     }
                                                 },
+                                                BinaryOperator::NotEq => {
+                                                    if &row_vals.col == sc_name.as_ref().unwrap() && row_vals.value != sc_val {
+                                                        match_success(&mut match_found, &mut op_for_row.clone(), &mut s_rows, row);
+                                                        break;
+                                                    }
+                                                },
+                                                BinaryOperator::Gt => { // value from database must be greater then given
+                                                    let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &sc_name, &sc_val, row_vals); // data required for all numeric operations
+
+                                                    if (&row_vals.col == sc_name.as_ref().unwrap()) && (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
+                                                        if number_to_check.1 > number_is_checker.1 { // value from row must be greater then that from query
+                                                            match_success(&mut match_found, op_for_row, &mut s_rows, row);
+                                                            break;
+                                                        }
+                                                    }
+                                                },
+                                                BinaryOperator::GtEq => {
+                                                    let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &sc_name, &sc_val, row_vals); // data required for all numeric operations
+
+                                                    if (&row_vals.col == sc_name.as_ref().unwrap()) && (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
+                                                        if number_to_check.1 >= number_is_checker.1 { // value from row must be greater or equal to that from query
+                                                            match_success(&mut match_found, op_for_row, &mut s_rows, row);
+                                                            break;
+                                                        }
+                                                    }
+                                                },
+                                                BinaryOperator::Lt => {
+                                                    let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &sc_name, &sc_val, row_vals); // data required for all numeric operations
+
+                                                    if (&row_vals.col == sc_name.as_ref().unwrap()) && (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
+                                                        if number_to_check.1 < number_is_checker.1 { // value from row must be greater or equal to that from query
+                                                            match_success(&mut match_found, op_for_row, &mut s_rows, row);
+                                                            break;
+                                                        }
+                                                    }
+                                                },
+                                                BinaryOperator::LtEq => {
+                                                    let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &sc_name, &sc_val, row_vals); // data required for all numeric operations
+
+                                                    if (&row_vals.col == sc_name.as_ref().unwrap()) && (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
+                                                        if number_to_check.1 <= number_is_checker.1 { // value from row must be greater or equal to that from query
+                                                            match_success(&mut match_found, op_for_row, &mut s_rows, row);
+                                                            break;
+                                                        }
+                                                    }
+                                                }
                                                 _ => () // no handled
                                             }
                                         }
@@ -677,7 +763,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                 }
                                 else {
                                     // Lead further for other "op" types like Eq/Gt/Less etc...
-                                    search_match_in_row();
+                                    search_match_in_row(op_for_row);
 
                                     // When result hasn't been matched in any row by above clousure (enclosed in brackets "{}")
                                     if !match_found {
