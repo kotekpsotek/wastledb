@@ -2,10 +2,9 @@
 use std::{fs, path::{Path, PathBuf}, collections::HashMap};
 
 use serde::{self, Deserialize, Serialize};
-use serde_json::Value;
 use sqlparser::{
     self,
-    ast::{ColumnOption, ColumnOptionDef, DataType, Statement, Expr},
+    ast::{ColumnOption, ColumnOptionDef, DataType, Statement, Expr, Value as SQLParserValue, BinaryOperator},
 };
 use Statement::*;
 
@@ -136,6 +135,19 @@ pub enum ProcessSQLSupportedQueries<'x> {
     ), // 1. Table name, 2. Vector with table columns and characteristic for each column
     Truncate(TablePath<'x>),
     Select(TablePath<'x>, ActionOnlyForTheseColumns, Option<Expr>) // path to table, 2. return results for specific record tuples can be all, 3. Select only these records
+}
+
+#[derive(Debug, Clone)]
+/// Describe operation for row
+struct RowWhereOperation {
+    /// column name
+    column: Option<String>,
+    /// column value
+    value: Option<String>,
+    /// type is from "sqlparser" crate
+    op: BinaryOperator,
+    /// in match operation indicates whether operation has been successfullperformed
+    perf: Option<bool>
 }
 
 /// Processing attached SQL query and returns its result as "JsonSQLTable" type ready to serialize, to json format thanks to "serde" and "serde_json" crates
@@ -500,85 +512,237 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
             let mut json_t_data = serde_json::from_str::<JsonSQLTable>(&table_data).unwrap(); // I trust other Database functionalities to maintain correct JSON format
             let t_d_rows = &json_t_data.rows; // WARNING: for simply access but not for assign values!!!
 
-            if conditions.is_none() {
-                if t_d_rows.is_some() {
-                    let t_d_rows = t_d_rows.as_ref().unwrap();
-                    if t_d_rows.len() > 0 {
-                        // Get whether user pass columns which are into table or pass "all" option (for return all columns)
-                        let table_col_names = json_t_data.columns.iter()
-                            .enumerate()
-                            .filter_map(|col| {
-                              Some(&col.1.name)
-                           })
-                            .collect::<Vec<&String>>();
-                        let user_pass_table_cols = resulting_columns.iter()
-                            .enumerate()
-                            .all(|col_to_ret| {
-                                let col_name = col_to_ret.1;
-                            
-                                if table_col_names.contains(&col_name) || col_name == &"all".to_string() {
-                                    return true;
-                                };
+            if t_d_rows.is_some() {
+                let t_d_rows = t_d_rows.as_ref().unwrap();
+                if t_d_rows.len() > 0 {
+                    // Get whether user pass columns which are into table or pass "all" option (for return all columns)
+                    let table_col_names = json_t_data.columns.iter()
+                        .enumerate()
+                        .filter_map(|col| {
+                          Some(&col.1.name)
+                       })
+                        .collect::<Vec<&String>>();
+                    // Whether user add table column names or appropraite option
+                    let user_pass_table_cols = resulting_columns.iter()
+                        .enumerate()
+                        .all(|col_to_ret| {
+                            let col_name = col_to_ret.1;
+                        
+                            if table_col_names.contains(&col_name) || col_name == &"all".to_string() {
+                                return true;
+                            };
 
-                                false
-                            });
+                            false
+                        });
 
-                        // TODO: Make conditions given after 'WHERE' usable (if were putted)
+                    // TODO: Make conditions given after 'WHERE' usable (if were putted)
+                    if let Some(expr_conditions) = conditions {
+                        // list with converted expressions from 'WHERE'
+                        let mut operations_for_row: Vec<RowWhereOperation> = Vec::new(); // [{ column: Some("gender"), value: Some("male"), op: Eq }, { op: And, column: None, value: None }]
 
-                            // Go ahead only when user pass table column names or "all" option
-                        if user_pass_table_cols {
-                            // Return only fields for columns which user would like to get
-                            if resulting_columns[0] == "all" {
-                                // Return all columns for matched records
-                                json_t_data.rows = Some(t_d_rows.to_owned());
-                                return Ok(json_t_data);
+                        /// Function for convert Expr::BinOp to RowWhereOperation expression and put it into "operations_for_row" collection to facilitate performant 'WHERE' computing
+                        fn convert_binarop(expr: Expr, converted_list: &mut Vec<RowWhereOperation>) -> Result<(), ()> {
+                            if let Expr::BinaryOp { left, op, right } = expr { // for parent
+                                /// To convert expression witch doesn't rollup further to conjuction (And, Or) 
+                                fn for_value_and_column(op_row_collection: &mut Vec<RowWhereOperation>, right: &Box<Expr>, left: &Box<Expr>, op: &BinaryOperator) -> Result<(), ()> {
+                                    let no_rollup_cond = RowWhereOperation {
+                                        column: { // column "name"
+                                            match &**left {
+                                                Expr::Identifier(d) => {
+                                                    Some(d.value.clone())
+                                                },
+                                                _ => return Err(()) // incorrect parsed condition
+                                            }
+                                        },
+                                        op: op.clone(), // operation type like: Eq, NotEq, Less , ...
+                                        value: { // column "value"
+                                            match &**right {
+                                                Expr::Identifier(d) => {
+                                                    Some(d.value.clone())
+                                                },
+                                                Expr::Value(value) => {
+                                                    match value {
+                                                        SQLParserValue::SingleQuotedString(sval) | SQLParserValue::DoubleQuotedString(sval) => Some(sval.to_owned()),
+                                                        SQLParserValue::Number(num, _) => {
+                                                            Some(num.clone())
+                                                        },
+                                                        SQLParserValue::Boolean(boolval) => Some(boolval.to_string()),
+                                                        SQLParserValue::Null => Some(String::from("null")),
+                                                        _ => return Err(())
+                                                    }
+                                                },
+                                                _ => return Err(()) // incorrect parsed condition
+                                            }
+                                        },
+                                        perf: None
+                                    };
+
+                                    // Add condition part to list
+                                    op_row_collection.push(no_rollup_cond);
+
+                                    // Performed indicator result
+                                    Ok(())
+                                }
+                                
+                                /// Appropriate action to appropriate outcome
+                                match op {
+                                    BinaryOperator::And | BinaryOperator::Or => { // for multiple blocks // in that case "left" and "right" keys allways represents next "BinaryOp" struct
+                                        // left
+                                        convert_binarop(*left, converted_list)?;
+
+                                        // Add conjuction
+                                        let conjuction = RowWhereOperation {
+                                            column: None,
+                                            value: None,
+                                            op: op.clone(),
+                                            perf: None
+                                        };
+                                        converted_list.push(conjuction);
+
+                                        // right
+                                        convert_binarop(*right, converted_list)?;
+
+                                        // Result
+                                        Ok(())
+                                    }, 
+                                    _ => for_value_and_column(converted_list, &right, &left, &op) // for row operations   
+                                }
                             }
                             else {
-                                // Return only fields for columns which user would like to get 
-                                let mut f_results = vec![] as Vec<Vec<JsonSQLTableColumnRow>>;
-                                for row in t_d_rows.clone() {
-                                    let mut row_passed_fields_ready = vec![] as Vec<JsonSQLTableColumnRow>;
-                                    let _ = row
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|field| {
-                                            let f_d = field.1;
-
-                                            if resulting_columns.contains(&f_d.col) {
-                                                return true
-                                            };
-
-                                            return false
-                                        })
-                                        .collect::<Vec<(usize, &JsonSQLTableColumnRow)>>()
-                                        .into_iter()
-                                        .for_each(|record| {
-                                            row_passed_fields_ready.push(record.1.to_owned())
-                                        });
-                                    f_results.push(row_passed_fields_ready)
-                                }
-
-                                json_t_data.rows = Some(f_results);
-                                return Ok(json_t_data);
+                                // No-predicted behave
+                                Err(())
                             }
                         }
+
+                        // Convert whole to expected form
+                        convert_binarop(expr_conditions, &mut operations_for_row)?;
+
+                        let mut s_rows = Vec::new() as Vec<Vec<JsonSQLTableColumnRow>>;
+                        let mut op_performed_whole = true; // when false result shoudn't be returned and search operation performed further
+                        
+                        // Iterate over conditions and try to find appropriate columns
+                        let mut it_op_id = 0;
+                        loop {
+                            if it_op_id < operations_for_row.len() && op_performed_whole {
+                                // get condition to later match
+                                let rm = operations_for_row.clone(); // to easy compare in And, Or conditions
+                                let op_for_row = &mut operations_for_row[it_op_id];
+
+                                // Src operation trashold:
+                                let sc_name = op_for_row.column.clone();
+                                let sc_val = op_for_row.value.clone();
+                                let mut match_found: bool = false;
+    
+                                //... Comparing clousure // op: "Eq"/"Less" etc...
+                                let mut search_match_in_row = || {
+                                    for row in t_d_rows {
+                                        for row_vals in row {
+                                            // Perform specific action abd add positive match result to results list
+                                            match op_for_row.op {
+                                                BinaryOperator::Eq => {
+                                                    if &row_vals.col == sc_name.as_ref().unwrap() && row_vals.value == sc_val {
+                                                        match_found = true; // match is here so indicate other members about that
+                                                        op_for_row.perf = Some(true); // indicate that operation has been successfull performed
+                                                        s_rows.push(row.clone());
+                                                        break;
+                                                    }
+                                                },
+                                                _ => () // no handled
+                                            }
+                                        }
+                                    }
+
+                                    // For consistancy: when match wasn't found (cohestive working should be represented in this way)
+                                    if !match_found {
+                                        op_for_row.perf = Some(false);
+                                    }
+                                };
+    
+                                // And/Or conditions pissed here
+                                if let BinaryOperator::And = op_for_row.op {
+                                    if rm[it_op_id - 1].perf.is_some() && rm[it_op_id - 1].perf.unwrap() {
+                                        // lead operation further
+                                        search_match_in_row();
+                                    }
+                                    else {
+                                        // stop operation in for e.g in case like: previous search operation ends with "false" result because whatever row hasn't been matched to condition 
+                                        op_performed_whole = false; // stop operation further in operation stage
+                                        break; // stop operation further locally
+                                    }
+                                }
+                                else {
+                                    // Lead further for other "op" types like Eq/Gt/Less etc...
+                                    search_match_in_row();
+
+                                    // When result hasn't been matched in any row by above clousure (enclosed in brackets "{}")
+                                    if !match_found {
+                                        if let BinaryOperator::And = rm[it_op_id - 1].op {
+                                            op_performed_whole = false; // because all conditions between "AND" statement must results in match found (outcome "true")
+                                        }
+                                        // TODO: BinaryOperator::Or
+                                    }
+                                }
+
+                                // increase iterated elements colunt
+                                it_op_id += 1;
+                            }
+                            else {
+                                break;
+                            }
+                        };
+                        println!("{:#?} {}", s_rows, op_performed_whole);
+                    }
+
+                        // Go ahead only when user pass table column names or "all" option
+                    if user_pass_table_cols {
+                        // Return only fields for columns which user would like to get
+                        if resulting_columns[0] == "all" {
+                            // Return all columns for matched records
+                            json_t_data.rows = Some(t_d_rows.to_owned());
+                            return Ok(json_t_data);
+                        }
                         else {
-                            return Err(())
+                            // Return only fields for columns which user would like to get 
+                            let mut f_results = vec![] as Vec<Vec<JsonSQLTableColumnRow>>;
+                            for row in t_d_rows.clone() {
+                                let mut row_passed_fields_ready = vec![] as Vec<JsonSQLTableColumnRow>;
+                                let _ = row
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|field| {
+                                        let f_d = field.1;
+
+                                        if resulting_columns.contains(&f_d.col) {
+                                            return true
+                                        };
+
+                                        return false
+                                    })
+                                    .collect::<Vec<(usize, &JsonSQLTableColumnRow)>>()
+                                    .into_iter()
+                                    .for_each(|record| {
+                                        row_passed_fields_ready.push(record.1.to_owned())
+                                    });
+                                f_results.push(row_passed_fields_ready)
+                            }
+
+                            json_t_data.rows = Some(f_results);
+                            return Ok(json_t_data);
                         }
                     }
                     else {
-                        // Return table withput rows // with null benath "rows" key
-                        json_t_data.rows = None; // Return null for "rows" but not empty array. "serde_json" threat that as null in json file
-                        return Ok(json_t_data)
+                        return Err(())
                     }
                 }
                 else {
                     // Return table withput rows // with null benath "rows" key
+                    json_t_data.rows = None; // Return null for "rows" but not empty array. "serde_json" threat that as null in json file
                     return Ok(json_t_data)
                 }
             }
             else {
-                Err(())
+                // Return table withput rows // with null benath "rows" key
+                return Ok(json_t_data)
             }
         }
     }
