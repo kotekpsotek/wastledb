@@ -651,6 +651,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                 let mut match_found: bool = false;
     
                                 //... Comparing clousure // op: "Eq"/"Less" etc...
+                                    // TODO: remove rows which doesn't match to query
                                 let mut search_match_in_row = |op_for_row: &mut RowWhereOperation| {
                                     for row in &*t_d_rows {
                                         for row_vals in row {
