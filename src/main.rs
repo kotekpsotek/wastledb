@@ -91,10 +91,13 @@ mod tests {
     use format as f;
     use super::inter::MAXIMUM_RESPONSE_SIZE_BYTES;
 
+    use rsa::{self,  pkcs1::{self, DecodeRsaPublicKey, DecodeRsaPrivateKey} };
+
     fn register_user_by_tcp() -> String {
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
         
         // Request
+            // When rsa option is picked (rsa|x=x|true ["|x=x|" is key->value separator]) then publick key wil be recived in response as last option
         connection.write("Register;login|x=x|tester 1-1 password|x=x|123456789 1-1 connect_auto|x=x|dogo 1-1 rsa|x=x|true".as_bytes()).unwrap();
 
         // Response
@@ -105,6 +108,30 @@ mod tests {
         
         // Return response
         resp_str
+    }
+
+    /// Convert message body to ready to use passages
+    /// fn(register_message_body) -> (session_id, rsa_public_key (or None)) 
+    fn parse_register_response_body(body: String) -> (String, Option<rsa::RsaPublicKey>) {
+        let res_body = body.split(";").collect::<Vec<&str>>()[1].replace("\0", "");
+        let keys_vals_separation = res_body.split("|x=x|").collect::<Vec<&str>>();
+
+        let sess_id = String::from(keys_vals_separation[0]); // sess id always first
+        let public_key = { // public key should be 2 in callback body and it must be correct public key to be returned
+            if keys_vals_separation.len() > 1 {
+                if let Ok(key) = rsa::RsaPublicKey::from_pkcs1_pem(keys_vals_separation[1]) {
+                    Some(key)
+                }
+                else {
+                    None
+                }
+            }
+            else {
+                None
+            }
+        };
+
+        (sess_id, public_key)
     }
 
     #[test]
@@ -130,7 +157,7 @@ mod tests {
         // First call = Register user
         let registered_response = register_user_by_tcp();
             //... session id in form without \0 (empty) characters
-        let sess_id = registered_response.split(";").collect::<Vec<&str>>()[1].replace("\0", "");
+        let sess_id = parse_register_response_body(registered_response).0;
         
         // Second call (source)
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
@@ -150,7 +177,7 @@ mod tests {
         // First call = Register user
         let registered_response = register_user_by_tcp();
             //... session id in form without \0 (empty) characters
-        let sess_id = registered_response.split(";").collect::<Vec<&str>>()[1].replace("\0", "");
+        let sess_id = parse_register_response_body(registered_response).0;
 
         // Second call (source)
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");

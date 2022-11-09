@@ -17,7 +17,9 @@ sysinfo = "0.26.6"
 datafusion = "13.0.0"
 tokio = { version = "1.21.2", features = ["full"] }
 rsa = "0.7.1"
+aes-gcm = "0.10.1"
 rand = "0.8.5"
+generic-array = "0.14.6"
 
 [profile.dev.package.num-bigint-dig]
 opt-level = 3

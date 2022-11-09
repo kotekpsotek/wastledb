@@ -76,7 +76,7 @@ fn read_users_file() -> FileDatas {
 fn convert_bytes_to_hex_string(bytes: &[u8]) -> String { // convert utf-8 bytes to hexdecimal bytes and put them into string. Function is used in order to prevent from "incorrect utf-8 character error" (invoked after hash data)
     let mut hex_login = String::new();
     for byte in bytes {
-        write!(&mut hex_login, "{:#04X?} ", byte).expect("Unable to write");
+        write!(hex_login, "{:#04X?} ", byte).expect("Unable to write");
     };
     hex_login
 }

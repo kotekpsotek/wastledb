@@ -1,4 +1,4 @@
-use std::{io::{Write, Read}, fmt::format};
+use std::{io::{Write, Read}, fmt::format, vec};
 #[path ="../login-system.rs"]
 mod login_system;
 #[path ="../management"]
@@ -14,13 +14,18 @@ use {
     std::path::Path,
     std::sync::{Arc, Mutex}
 };
+use datafusion::parquet::data_type::AsBytes;
+use generic_array::{ typenum::{ UInt, UTerm, B1, B0 }, GenericArray};
 use login_system::authenticate_user;
 use uuid::{Uuid, timestamp};
 use tokio;
 use crate::inter;
 use management::main::Outcomes::*;             
-use rsa::{self, RsaPrivateKey, RsaPublicKey, pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey}, PublicKeyParts};
-use rand;
+use rsa::{self, RsaPrivateKey, RsaPublicKey, pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, DecodeRsaPrivateKey}, PublicKeyParts, PublicKey, PaddingScheme};
+use rand::{self, Rng};
+use aes_gcm::{
+    Aes256Gcm, Nonce, aead::{Aead, KeyInit, OsRng}
+};
 
 // 
 enum ResponseTypes {
@@ -29,11 +34,15 @@ enum ResponseTypes {
 }
 
 impl ResponseTypes {
-    fn handle_response(&self, stream: Option<TcpStream>, session_id: Option<String>) {
+    /** 
+     * Function to handle TCP server response by write message response bytes to TcpStream represented by "stream" param. In case when response can't be send error message about that will be printed in cli
+     *  "public_rsa_key" param - is attached to response only in case when user send to server request with picked option "rsa=true" and only in communication initialization command so for "Regiseter" only
+    **/
+    fn handle_response(&self, stream: Option<TcpStream>, sessions: Option<&mut HashMap<String, String>>, session_id: Option<String>, public_rsa_key: Option<String>) {
         // Give appropriate action to determined response status
         let mut result_message: String = "NOT".to_string();
             // When below code not handle response type in that case "NOT" response is returned to client
-        if matches!(self, ResponseTypes::Error(_)) { 
+        if matches!(self, ResponseTypes::Error(_)) { // handle error responses
             // handle not-sucesfull reasons (only here)
             if matches!(self, ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason)) || matches!(self, ResponseTypes::Error(ErrorResponseKinds::IncorrectRequest | ErrorResponseKinds::GivenSessionDoesntExists | ErrorResponseKinds::SessionTimeExpired)) { // Handle all for message "Err" response
                 let message_type = "Err;";
@@ -57,15 +66,25 @@ impl ResponseTypes {
                 result_message = format!("Couldn't perform query") // TODO: add reason from "ErrorResponseKinds::CouldntPerformQuery(_)" (is in omitted place by "_")
             }
         }
-        else if matches!(self, ResponseTypes::Success(_)) {
-            result_message = if matches!(self, ResponseTypes::Success(true)) {
-                    //...here session id must be attached to method call
-                let session_id = session_id.expect(&format!("You must attach session id to \"{}\" method in order to handle correct results when {}", stringify!(self.handle_response), stringify!(Self::Success(true))));
-                format!("OK;{}", session_id).to_string()
+        else if matches!(self, ResponseTypes::Success(_)) { // handle success responses
+            result_message = {
+                if matches!(self, ResponseTypes::Success(true)) {
+                        //...here session id must be attached to method call
+                    let session_id = session_id.clone().expect(&format!("You must attach session id to \"{}\" method in order to handle correct results when {}", stringify!(self.handle_response), stringify!(Self::Success(true))));
+                    let mut respose_msg =  format!("OK;{}", session_id).to_string();
+
+                        // Add public key to response (Attached when use choose earlier rsa communication encryption)
+                    if let Some(public_rsa_key) = public_rsa_key {
+                        respose_msg.push_str(&format!("|x=x|{}", public_rsa_key));
+                    };
+                    
+                    // WARNING: Session id and whole payload isn't encrypted using RSA private key
+                    respose_msg
+                }
+                else {
+                    "OK".to_string()
+                }
             }
-            else {
-                "OK".to_string()
-            };
         }
 
         // Send response
@@ -75,7 +94,15 @@ impl ResponseTypes {
         };
         match stream {
             Some(mut stri) => {
-                let resp = stri.write(result_message.as_bytes());
+                    // When encryption result is Some() then send to user encrypted payload using RSA Private Key otherwise send to user raw response payload
+                let ready_result_message_raw = result_message.as_bytes();
+                    // Send to user encrypted response payload when all Option<_> arguments are enclosed in Some() variant and everything other is good (private and public keys are present, private key are in correct pkcs#1_pem format), [all RSA keys are stored in session data as pem strings]
+                let response_ready = match CommmunicationEncryption::encrypt_response(session_id.clone(), sessions, ready_result_message_raw) { 
+                    Some(b_msg) => b_msg,
+                    None => ready_result_message_raw.to_vec()
+                };
+                    // Try send to user response
+                let resp = stri.write(&response_ready[..]);
                 if let Err(_) = resp { // time when to user can't be send response because error is initialized durning creation of http server
                     couldnt_send_response();
                 }
@@ -352,22 +379,146 @@ pub struct SessionData {
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub struct CommmunicationEncryption {
     private_key: String,
-    public_key: String
+    public_key: String,
+    aes_gcm_key: String,
+    nonce: String
 }
 
+/// Valulable interface for ensure private, secure exchange data between client and SQL database
 impl CommmunicationEncryption {
+    /// Convert Vector<u8> (containing bytes) to vector with hex values
+    fn convert_vec_bytes_to_hex(vec_bytes: Vec<u8>) -> Vec<String> {
+        let mut result_str = Vec::new() as Vec<String>;
+        for byte in vec_bytes {
+            let str_r = format!("{:X}", byte);
+            result_str.push(str_r);
+        }
+
+        result_str
+    }
+
+    /// Convert from Vec<String> (containing hexes) to Vector with u8. You should worry: because here aren't any ensures that byte is correct utf-8/ascii encoding byte like in AES-256-gcm storing format (always in hex)
+    fn from_hex_to_vec_bytes(vec_hexes: Vec<String>) -> Vec<u8> {
+        let mut vec_u8: Vec<u8> = Vec::new();
+
+        for hex_str in vec_hexes {
+            let u8_str = u8::from_str_radix(&hex_str, 16).expect("Coluldn't convert hex to byte again");
+            vec_u8.push(u8_str);
+        }
+
+        vec_u8
+    }
+    
+    /// Generate all required keys to establish and perform secure communication in both ways
     // INFORMATION: Generation RSA keys (2: 1 - public, 1 - private) takes some additional time // To speedup keys generation you should comply to adivice given on "https://github.com/RustCrypto/RSA" ("rsa" crate authors github repo) -> you should add optimalizations to Cargo.toml file to speedup generation of the key (global optymalizations or for essential crate what is "num-bigint-dig" (add opt-level) to this crate should speedup keys generation time  20 times almost or more (I didn't measure it with timer))
-    fn gen_rsa_keys() -> Self {
+    fn gen_keys() -> Self {
         let key_len = 4096; // key length in bytes // 4096 is the most secure and appropriate key base on NIST recomendation
         let private_key = RsaPrivateKey::new(&mut rand::thread_rng(), key_len).unwrap();
         let public_key = RsaPublicKey::from(&private_key);
+        let aes_key = Aes256Gcm::generate_key(&mut OsRng);
+        let nonce_slice = vec![0; 12];
+        let nonce: &GenericArray::<u8, UInt<UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>, B0>> = Nonce::from_slice(nonce_slice.as_bytes()); // 96-bits; unique per message (means: created in first and re-generated in each next new response)
         let string_private_key = RsaPrivateKey::to_pkcs1_pem(&private_key, rsa::pkcs1::LineEnding::CRLF).unwrap().to_string();
         let string_public_key = RsaPublicKey::to_pkcs1_pem(&public_key, rsa::pkcs1::LineEnding::CRLF).unwrap().to_string();
+        let string_hex_aes_key = Self::convert_vec_bytes_to_hex(aes_key.to_vec()).join(" "); // obtain Vec<u8> (Vector with bytes) to hex format then create from outcoming Vec String by separate hex values using "whitespace character"
+        let string_hex_nonce = Self::convert_vec_bytes_to_hex(nonce.to_vec()).join(" ");
 
+        // this object will be store into sessions
         Self {
             private_key: string_private_key,
-            public_key: string_public_key
+            public_key: string_public_key,
+            aes_gcm_key: string_hex_aes_key,
+            nonce: string_hex_nonce // here nonce is initially generated
         }
+    }
+
+    /// Function to facilitate obtaining AES key for encryption and decryption processes
+    fn aes_obtain_key(key_str_hex: &String) -> GenericArray::<u8, UInt<UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>, B0>> {
+        let key_vec = Self::from_hex_to_vec_bytes(key_str_hex.split(" ").collect::<Vec<&str>>().iter().map(|val| val.to_string()).collect::<Vec<String>>());
+        let ready_encrypt_key = GenericArray::<u8, UInt<UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>, B0>>::from_slice(&key_vec[..]);
+        
+        ready_encrypt_key.to_owned()
+    }
+
+    /// Encrypt given message using for that previous generated aes-gcm key (key is generated and attached to session when first communication was recived from client)
+    fn aes_256_gcm_encrypt(key_str_hex: &String, msg: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        // Obtain previous generated AES key
+        let ready_encrypt_key = Self::aes_obtain_key(key_str_hex);
+
+        // Encrypt message using key and nonce
+        let cipher = Aes256Gcm::new(&ready_encrypt_key);
+        let nonce_slice = vec![0; 12];
+        let nonce = Nonce::from_slice(nonce_slice.as_bytes()); // 96-bits; unique per message (means: created in first and re-generated in each next new response)
+        let ciphertext = cipher.encrypt(nonce, msg).unwrap(); // in encryption process we have more control on what is encryptes thus .unwrap() in this scenarion isn't such bad
+
+        // Prepare returned values
+        (ciphertext, nonce_slice)
+    }
+
+    /// Decrypt recived message as hex string to form of Vector with probably correct utf-8 bytes. 
+    fn aes_256_gcm_decrypt(key_str_hex: &String, nonce: Vec<u8>, msg_hex: &String) -> Result<Vec<u8>, ()> {
+        // Obtain previous generated AES key
+        let ready_encrypt_key = Self::aes_obtain_key(key_str_hex);
+
+        // Decrypt message using key and nonce
+        let cipher = Aes256Gcm::new(&ready_encrypt_key);
+        let message_vec_bytes = Self::from_hex_to_vec_bytes(msg_hex.split(" ").collect::<Vec<&str>>().iter().map(|val| val.to_string()).collect::<Vec<String>>());
+        // TODO: Same action with nonce
+        let nonce = Nonce::from_slice(&nonce[..]);
+        let plaintext = cipher.decrypt(nonce,&message_vec_bytes[..]).map_err(|_| ())?;
+
+        // Return encrypted key when it can be encrypted
+        Ok(plaintext)
+    }
+
+    /// Encrypt response payload using for this generated previous private key from RSA keys pair (private key, public key) and AES Secret (AES-256-GCM)
+    /// Nonce (for block ciher) will be new for each dbs response
+    /// All params enclosed in Option<_> must be Some() variant in order to encrypt message!
+    fn encrypt_response<'l>(session_id: Option<String>, sessions: Option<&mut HashMap<String, String>>, result_message_raw: &[u8]) -> Option<Vec<u8>> {
+            // Try to obtain session_id String
+        let sess_id = if let Some(sess_id) = session_id {
+            Some(sess_id)
+        }
+        else {
+            None
+        }?;
+            // Perform only when sess_id = Some(session_id) and sessions = Some(sessions_list). Get user session data which are im json format (user is represented by "session_id" param)
+        let user_sess_dat = if let Some(ses) = sessions {
+            ses.get(&sess_id)
+        }
+        else {
+            None
+        }?;
+            // Obtain user data from session
+        let user_sess_dat_struct = serde_json::from_str::<SessionData>(user_sess_dat)
+            .unwrap();
+        let user_sess_encryption_dat = user_sess_dat_struct.encryption?;
+
+        // Cipher message using AES-256-GCM
+        let encrypted_message_op = Self::aes_256_gcm_encrypt(&user_sess_encryption_dat.aes_gcm_key, result_message_raw);
+        let encrypted_message = encrypted_message_op.0;
+        let nonce = encrypted_message_op.1;
+
+        // Encrypt AES key using RSA
+            // Extract user sess dat as sessions struct. Session data always should be in correct json format
+        // let user_private_key = serde_json::from_str::<SessionData>(user_sess_dat)
+        //     .unwrap()
+        //     .encryption 
+        //     .map_or_else(|| None, |enc| {
+        //         Some(enc.private_key)
+        //     })?;
+        //     // Format "user_private_key" string to private key struct
+        // let private_key_encr_ready = RsaPrivateKey::from_pkcs1_pem(&user_private_key)
+        //     .map_or_else(|_| None, |key| Some(key))?;
+        //     // Prepare required params to encrypt message using private key and encrypt message + convert encryption result which is Vec<u8> to &[u8]
+        // let mut rng = rand::thread_rng();
+        // let padding = PaddingScheme::new_pkcs1v15_encrypt();
+        // println!("{:?}", result_message_raw);
+        // let encrypted_message = private_key_encr_ready.encrypt(&mut rng, padding, result_message_raw)
+        //     .map_or_else(|err| {panic!("{}", err); None}, |enc_mess| Some(enc_mess))?;
+
+            // Return success response
+        // Some(encr_message)       
     }
 }
 
@@ -503,7 +654,7 @@ pub async fn handle_tcp() {
                                             connected_to_database: connected_to_db,
                                             encryption: {
                                                 if use_rsa {
-                                                    Some(CommmunicationEncryption::gen_rsa_keys()) // generate both required keys for rsa // WARNING: this always take some additional time
+                                                    Some(CommmunicationEncryption::gen_keys()) // generate both required keys for rsa // WARNING: this always take some additional time
                                                 }
                                                 else {
                                                     None
@@ -517,16 +668,24 @@ pub async fn handle_tcp() {
                                                 // Add session value to sessions list
                                                 sessions.insert(uuid_gen.clone(), ses_val);
                                                 // println!("{:?}", sessions); // Test: print all sessions in list after add new session
-                                                println!("{:#?}", sessions);
 
                                                 // Send response
-                                                ResponseTypes::Success(true).handle_response(s, Some(uuid_gen))
+                                                    // Attach public key to response for bring encryption between client and server. Only attached when "use_rsa" option has been attached to request
+                                                let public_key = {
+                                                    if let Some(keys_pack) = session_data.encryption {
+                                                        Some(keys_pack.public_key)
+                                                    } 
+                                                    else {
+                                                        None
+                                                    }
+                                                };
+                                                ResponseTypes::Success(true).handle_response(s, Some(&mut *sessions), Some(uuid_gen), public_key)
                                             },
-                                            _ => ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(s, None)
+                                            _ => ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(s, None, None, None)
                                         };
                                     }
                                     else {
-                                        ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin).handle_response(s, None)
+                                        ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin).handle_response(s, None, None, None)
                                     }
                                 },
                                 CommandTypes::KeepAliveRes(ses_id, timestamp) => { // command to extend session life (heartbeat system -> so keep-alive)
@@ -543,19 +702,19 @@ pub async fn handle_tcp() {
                                     sessions.insert(ses_id.clone(), json_new_sess_data);
 
                                         // Send response
-                                    ResponseTypes::Success(false).handle_response(Some(stream), Some(ses_id))
+                                    ResponseTypes::Success(false).handle_response(Some(stream), Some(&mut *sessions), Some(ses_id), None)
                                 },
                                 CommandTypes::CommandRes(query) => {
                                     // Furthermore process query by database
                                     println!("Query: {}", query);
 
                                     // Send success response to client
-                                    ResponseTypes::Success(false).handle_response(Some(stream), None)
+                                    ResponseTypes::Success(false).handle_response(Some(stream), Some(&mut *sessions), None, None)
                                 }
                                 _ => () // other types aren't results
                             }
                         },
-                        Err(err_kind) => ResponseTypes::Error(err_kind).handle_response(Some(stream), None)
+                        Err(err_kind) => ResponseTypes::Error(err_kind).handle_response(Some(stream), None, None, None)
                     };
                 }
                 Err(_) => {
@@ -568,7 +727,47 @@ pub async fn handle_tcp() {
             }
         }
         else { // while error durning creation of stream handler
-            ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(None, None)
+            ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(None, None, None, None)
         }
+    }
+}
+
+
+#[cfg(all(test))]
+mod tests {
+    use super::CommmunicationEncryption;
+
+    /* #[test]
+    fn ks() {
+        use aes_gcm::{
+            aead::{Aead, KeyInit, OsRng},
+            Aes256Gcm, Nonce // Or `Aes128Gcm`
+        };
+        
+        let key = Aes256Gcm::generate_key(&mut OsRng);
+        let cipher = Aes256Gcm::new(&key);
+        let nonce_slice = vec![0; 12];
+        let nonce = Nonce::from_slice(nonce_slice.as_bytes()); // 96-bits; unique per message
+        let ciphertext = cipher.encrypt(nonce, b"plaintext message".as_ref()).unwrap();
+        let plaintext = cipher.decrypt(nonce, ciphertext.as_ref()).unwrap();
+    } */
+
+    #[test]
+    fn enc_keys() {
+        let keys_set = CommmunicationEncryption::gen_keys();
+
+        // Below: Convert aes_key stored as String to Vec<u8> only that convertion allow to create same AesKey to in encode and decode messages by one
+        // let decrypted_aes_key = CommmunicationEncryption::from_hex_to_vec_bytes(keys_set.aes_gcm_key.split(" ").collect::<Vec<&str>>().iter().map(|val| val.to_string()).collect::<Vec<String>>());
+        // println!("Aes key in u8 after decryption: {:?}", decrypted_aes_key)
+
+        // Below: Complete process End-To-End Encrypt message using pre-generated keys and decrypt it again
+        let encryption_results = CommmunicationEncryption::aes_256_gcm_encrypt(&keys_set.aes_gcm_key, b"message which will be encrypted");
+        println!("Encryption result (in bytes): {:?}", encryption_results);
+        let encrypted_message_hex = CommmunicationEncryption::convert_vec_bytes_to_hex(encryption_results.0).join(" ");
+        println!("Convert encrypted message result to hex (in hex): {}", encrypted_message_hex);
+        let decryption_results = CommmunicationEncryption::aes_256_gcm_decrypt(&keys_set.aes_gcm_key, encryption_results.1, &encrypted_message_hex).expect("Message couldn't been decrypted!");
+        println!("Result of decryption of message (in bytes): {:?}", decryption_results);
+        let again_to_string = String::from_utf8(decryption_results).expect("Couldn't convert encrypted message to utf-8 string (rather some byte isn't correct with utf-8 characters bytes)");
+        println!("Decrypted message as string (utf-8 string): {}", again_to_string)
     }
 }
