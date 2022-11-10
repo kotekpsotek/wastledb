@@ -81,7 +81,7 @@ async fn main() {
 
 // WARNING: To start robust testing you must turn on tcp server first
 #[cfg(test)]
-mod tests {
+pub mod tests {
     #[path = "../login-system.rs"]
     mod login_module;
 
@@ -93,7 +93,7 @@ mod tests {
 
     use rsa::{self,  pkcs1::{self, DecodeRsaPublicKey, DecodeRsaPrivateKey} };
 
-    fn register_user_by_tcp() -> String {
+    pub fn register_user_by_tcp() -> String {
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
         
         // Request
