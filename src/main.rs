@@ -98,7 +98,7 @@ pub mod tests {
         
         // Request
             // When rsa option is picked (rsa|x=x|true ["|x=x|" is key->value separator]) then publick key wil be recived in response as last option
-        connection.write("Register;login|x=x|tester 1-1 password|x=x|123456789 1-1 connect_auto|x=x|dogo 1-1 rsa|x=x|true".as_bytes()).unwrap();
+        connection.write("Register;login|x=x|tester 1-1 password|x=x|123456789 1-1 connect_auto|x=x|dogo".as_bytes()).unwrap();
 
         // Response
         let mut buf = [0; MAXIMUM_RESPONSE_SIZE_BYTES];

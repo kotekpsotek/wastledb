@@ -528,7 +528,27 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
             let mut t_d_rows = json_t_data.clone().rows; // WARNING: for simply access but not for assign values!!!
 
             if t_d_rows.is_some() {
-                let mut t_d_rows = t_d_rows.as_mut().unwrap();
+                    // Attach to each row table unique id
+                #[derive(Debug)]
+                struct RowOperationForm {
+                    row: Vec<JsonSQLTableColumnRow>,
+                    id: u128
+                }
+                let mut id_operation_row = 0 as u128;
+                let mut t_d_rows = t_d_rows /* prepare each table row for search match operation */
+                    .as_mut()
+                    .unwrap()
+                    .iter()
+                    .map(|each_row| {
+                        id_operation_row += 1;
+                        RowOperationForm {
+                            row: each_row.to_owned(),
+                            id: id_operation_row
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let mut matched_rows: Vec<Vec<JsonSQLTableColumnRow>> = Vec::new(); // match results are storing here
+
                     // ... Table must have some rows to go further
                 if t_d_rows.len() > 0 {
                     // Get whether user pass columns which are into table or pass "all" option (for return all columns)
@@ -634,9 +654,10 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                         // Convert whole to expected form
                         convert_binarop(expr_conditions, &mut operations_for_row)?;
 
-                        let mut s_rows = Vec::new() as Vec<Vec<JsonSQLTableColumnRow>>;
+                        let mut s_rows = Vec::new() as Vec<Vec<JsonSQLTableColumnRow>>; // matched rows storage // are storing in this scope and later are "send" to heighter scope
                         let mut op_performed_whole = true; // when false result shoudn't be returned and search operation performed further
-                        
+                        let mut seeked_rows: Vec<u128> = Vec::new(); // Vector with ids rows which has been matched
+
                         // Iterate over conditions and try to find appropriate columns
                         let mut it_op_id = 0;
                         loop {
@@ -651,16 +672,23 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                 let mut match_found: bool = false;
     
                                 //... Comparing clousure // op: "Eq"/"Less" etc...
-                                    // TODO: remove rows which doesn't match to query
                                 let mut search_match_in_row = |op_for_row: &mut RowWhereOperation| {
+                                    // Search match in each row
                                     for row in &*t_d_rows {
-                                        for row_vals in row {
-                                            fn match_success(match_found: &mut bool, op_for_row: &mut RowWhereOperation, s_rows: &mut Vec<Vec<JsonSQLTableColumnRow>>, row: &Vec<JsonSQLTableColumnRow>) {
-                                                *match_found = true; // match is here so indicate other members about that
-                                                op_for_row.perf = Some(true); // indicate that operation has been successfull performed
-                                                s_rows.push(row.clone());
+                                        // Search result in each row value (column)
+                                        for row_vals in &row.row {
+                                            // For matched results: perform all that sugest that row has been match
+                                            // KEEP Vigilance: The most promiment function for whole search operation
+                                            fn match_success(match_found: &mut bool, op_for_row: &mut RowWhereOperation, s_rows: &mut Vec<Vec<JsonSQLTableColumnRow>>, matched_rows_list: &mut Vec<u128>, row: &RowOperationForm) {
+                                                if !matched_rows_list.contains(&row.id) { // Attach result only when it was not found previous
+                                                    *match_found = true; // match is here so indicate other members about that
+                                                    op_for_row.perf = Some(true); // indicate that operation has been successfull performed
+                                                    s_rows.push(row.row.clone()); // attach seeked row to seeked rows list
+                                                    matched_rows_list.push(row.id); // attach row id to matched rows list
+                                                }
                                             }
 
+                                            // Obtain all actions requied for match conditions such as: column data type, number from row, searched number
                                             type Comparision = (bool, i128);
                                             fn numeric_matches(json_t_data: &JsonSQLTable, sc_name: &Option<String>, sc_val: &Option<String>, row_vals: &JsonSQLTableColumnRow) -> (Option<SupportedSQLDataTypes>, Comparision, Comparision) {
                                                 let column_type = json_t_data.get_column_type(sc_name.as_ref().unwrap());  // column name always should be provided
@@ -686,52 +714,52 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                             match op_for_row.op {
                                                 BinaryOperator::Eq => { // values must be equal
                                                     if &row_vals.col == sc_name.as_ref().unwrap() && row_vals.value == sc_val {
-                                                        match_success(&mut match_found, &mut op_for_row.clone(), &mut s_rows, row);
+                                                        match_success(&mut match_found, &mut op_for_row.clone(), &mut s_rows, &mut seeked_rows, row);
                                                         break;
                                                     }
                                                 },
                                                 BinaryOperator::NotEq => {
                                                     if &row_vals.col == sc_name.as_ref().unwrap() && row_vals.value != sc_val {
-                                                        match_success(&mut match_found, &mut op_for_row.clone(), &mut s_rows, row);
+                                                        match_success(&mut match_found, &mut op_for_row.clone(), &mut s_rows, &mut seeked_rows, row);
                                                         break;
                                                     }
                                                 },
                                                 BinaryOperator::Gt => { // value from database must be greater then given
-                                                    let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &sc_name, &sc_val, row_vals); // data required for all numeric operations
+                                                    let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &sc_name, &sc_val, &row_vals); // data required for all numeric operations
 
                                                     if (&row_vals.col == sc_name.as_ref().unwrap()) && (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
                                                         if number_to_check.1 > number_is_checker.1 { // value from row must be greater then that from query
-                                                            match_success(&mut match_found, op_for_row, &mut s_rows, row);
+                                                            match_success(&mut match_found, op_for_row, &mut s_rows, &mut seeked_rows, row);
                                                             break;
                                                         }
                                                     }
                                                 },
                                                 BinaryOperator::GtEq => {
-                                                    let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &sc_name, &sc_val, row_vals); // data required for all numeric operations
+                                                    let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &sc_name, &sc_val, &row_vals); // data required for all numeric operations
 
                                                     if (&row_vals.col == sc_name.as_ref().unwrap()) && (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
                                                         if number_to_check.1 >= number_is_checker.1 { // value from row must be greater or equal to that from query
-                                                            match_success(&mut match_found, op_for_row, &mut s_rows, row);
+                                                            match_success(&mut match_found, op_for_row, &mut s_rows, &mut seeked_rows, row);
                                                             break;
                                                         }
                                                     }
                                                 },
                                                 BinaryOperator::Lt => {
-                                                    let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &sc_name, &sc_val, row_vals); // data required for all numeric operations
+                                                    let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &sc_name, &sc_val, &row_vals); // data required for all numeric operations
 
                                                     if (&row_vals.col == sc_name.as_ref().unwrap()) && (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
                                                         if number_to_check.1 < number_is_checker.1 { // value from row must be greater or equal to that from query
-                                                            match_success(&mut match_found, op_for_row, &mut s_rows, row);
+                                                            match_success(&mut match_found, op_for_row, &mut s_rows, &mut seeked_rows, row);
                                                             break;
                                                         }
                                                     }
                                                 },
                                                 BinaryOperator::LtEq => {
-                                                    let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &sc_name, &sc_val, row_vals); // data required for all numeric operations
+                                                    let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &sc_name, &sc_val, &row_vals); // data required for all numeric operations
 
                                                     if (&row_vals.col == sc_name.as_ref().unwrap()) && (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
                                                         if number_to_check.1 <= number_is_checker.1 { // value from row must be greater or equal to that from query
-                                                            match_success(&mut match_found, op_for_row, &mut s_rows, row);
+                                                            match_success(&mut match_found, op_for_row, &mut s_rows, &mut seeked_rows, row);
                                                             break;
                                                         }
                                                     }
@@ -794,16 +822,18 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                             }
                         };
 
+                        println!("{:?}", seeked_rows);
                         // Attach search results to next processing stage (only when where results has been found else return table without rows as a result of function)
                         if s_rows.len() > 0 {
-                            t_d_rows.clear();
-                            t_d_rows.extend(s_rows);
+                            std::mem::drop(t_d_rows); // remove prepared rows from memory faster than RAII should do this automatically
+                            matched_rows.extend(s_rows);
                         }
                         else {
                             json_t_data.rows = None;
                             return Ok(json_t_data);
                         };
                     }
+                    println!("{:#?}", matched_rows);
 
                     // Go ahead only when user pass table column names or "all" option
                     // Send to user only specified by him columns only when user pass these columns
@@ -811,13 +841,13 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                         // Return only fields for columns which user would like to get
                         if resulting_columns[0] == "all" {
                             // Return all columns for matched records
-                            json_t_data.rows = Some(t_d_rows.to_owned());
+                            json_t_data.rows = Some(matched_rows);
                             return Ok(json_t_data);
                         }
                         else {
                             // Return only fields for columns which user would like to get 
                             let mut f_results = vec![] as Vec<Vec<JsonSQLTableColumnRow>>;
-                            for row in t_d_rows.clone() {
+                            for row in matched_rows {
                                 let mut row_passed_fields_ready = vec![] as Vec<JsonSQLTableColumnRow>;
                                 let _ = row
                                     .iter()
