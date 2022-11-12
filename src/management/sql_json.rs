@@ -1,5 +1,5 @@
 #![allow(unused)]
-use std::{fs, path::{Path, PathBuf}, collections::HashMap};
+use std::{fs, path::{Path, PathBuf}, collections::{HashMap, HashSet}, borrow::BorrowMut};
 
 use serde::{self, Deserialize, Serialize};
 use sqlparser::{
@@ -529,7 +529,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
 
             if t_d_rows.is_some() {
                     // Attach to each row table unique id
-                #[derive(Debug)]
+                #[derive(Debug, Clone)]
                 struct RowOperationForm {
                     row: Vec<JsonSQLTableColumnRow>,
                     id: u128
@@ -572,7 +572,6 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                         });
 
                     //... Search results using conditions from 'WHERE'
-                        // TODO: system to prevent repeating same match when we use And concjustion with Or
                     if let Some(expr_conditions) = conditions {
                         // list with converted expressions from 'WHERE'
                         let mut operations_for_row: Vec<RowWhereOperation> = Vec::new(); // [{ column: Some("gender"), value: Some("male"), op: Eq }, { op: And, column: None, value: None }]
@@ -654,17 +653,21 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                         // Convert whole to expected form
                         convert_binarop(expr_conditions, &mut operations_for_row)?;
 
-                        let mut s_rows = Vec::new() as Vec<Vec<JsonSQLTableColumnRow>>; // matched rows storage // are storing in this scope and later are "send" to heighter scope
+                        let mut s_rows = Vec::new() as Vec<RowOperationForm>; // matched rows storage // are storing in this scope and later are "send" to heighter scope
                         let mut op_performed_whole = true; // when false result shoudn't be returned and search operation performed further
                         let mut seeked_rows: Vec<u128> = Vec::new(); // Vector with ids rows which has been matched
 
                         // Iterate over conditions and try to find appropriate columns
+                        type RowId = u128;
+                        let mut and_outcomes_for_all_conditions: Vec<Vec<(bool, RowId)>> = Vec::new(); // matches are in order in that conditions has been passed
+                        let mut or_exception_for_and_conditions: HashSet<RowId> = HashSet::new(); // row ids list which has been match by "OR" conjuction conditions thus shoudn't be deleted by "AND" delete row proceduree
                         let mut it_op_id = 0;
                         loop {
                             if it_op_id < operations_for_row.len() && op_performed_whole {
                                 // get condition to later match
                                 let rm = operations_for_row.clone(); // to easy compare in And, Or conditions
                                 let op_for_row = &mut operations_for_row[it_op_id];
+                                // println!("{:#?}", op_for_row);
 
                                 // Src operation trashold:
                                 let sc_name = op_for_row.column.clone();
@@ -673,17 +676,25 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
     
                                 //... Comparing clousure // op: "Eq"/"Less" etc...
                                 let mut search_match_in_row = |op_for_row: &mut RowWhereOperation| {
-                                    // Search match in each row
+                                    let mut and_condition_outcomes_from_each_row: Vec<(bool, RowId)> = Vec::new(); // store row matches for this condition (selected condition by "loop" block)
+
+                                    // Search match in each "row" of table
                                     for row in &*t_d_rows {
-                                        // Search result in each row value (column)
+                                        let mut and_con_match_found_in_row = false;
+                                        
+                                        // Search result in each "row value" from table
                                         for row_vals in &row.row {
                                             // For matched results: perform all that sugest that row has been match
                                             // KEEP Vigilance: The most promiment function for whole search operation
-                                            fn match_success(match_found: &mut bool, op_for_row: &mut RowWhereOperation, s_rows: &mut Vec<Vec<JsonSQLTableColumnRow>>, matched_rows_list: &mut Vec<u128>, row: &RowOperationForm) {
+                                            fn match_success(match_found: &mut bool, and_con_match_found_in_row: &mut bool, op_for_row: &mut RowWhereOperation, s_rows: &mut Vec<RowOperationForm>, matched_rows_list: &mut Vec<u128>, row: &RowOperationForm) {
+                                                // Pointers
+                                                *and_con_match_found_in_row = true; // that found result in row
+                                                *match_found = true; // match is here so indicate other members about that
+                                                op_for_row.perf = Some(true); // indicate that operation has been successfull performed
+                                                
+                                                // Body
                                                 if !matched_rows_list.contains(&row.id) { // Attach result only when it was not found previous
-                                                    *match_found = true; // match is here so indicate other members about that
-                                                    op_for_row.perf = Some(true); // indicate that operation has been successfull performed
-                                                    s_rows.push(row.row.clone()); // attach seeked row to seeked rows list
+                                                    s_rows.push(row.clone()); // attach seeked row to seeked rows list
                                                     matched_rows_list.push(row.id); // attach row id to matched rows list
                                                 }
                                             }
@@ -714,13 +725,13 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                             match op_for_row.op {
                                                 BinaryOperator::Eq => { // values must be equal
                                                     if &row_vals.col == sc_name.as_ref().unwrap() && row_vals.value == sc_val {
-                                                        match_success(&mut match_found, &mut op_for_row.clone(), &mut s_rows, &mut seeked_rows, row);
+                                                        match_success(&mut match_found, &mut and_con_match_found_in_row, &mut op_for_row.clone(), &mut s_rows, &mut seeked_rows, row);
                                                         break;
                                                     }
                                                 },
                                                 BinaryOperator::NotEq => {
                                                     if &row_vals.col == sc_name.as_ref().unwrap() && row_vals.value != sc_val {
-                                                        match_success(&mut match_found, &mut op_for_row.clone(), &mut s_rows, &mut seeked_rows, row);
+                                                        match_success(&mut match_found, &mut and_con_match_found_in_row, &mut op_for_row.clone(), &mut s_rows, &mut seeked_rows, row);
                                                         break;
                                                     }
                                                 },
@@ -729,7 +740,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
 
                                                     if (&row_vals.col == sc_name.as_ref().unwrap()) && (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
                                                         if number_to_check.1 > number_is_checker.1 { // value from row must be greater then that from query
-                                                            match_success(&mut match_found, op_for_row, &mut s_rows, &mut seeked_rows, row);
+                                                            match_success(&mut match_found, &mut and_con_match_found_in_row, op_for_row, &mut s_rows, &mut seeked_rows, row);
                                                             break;
                                                         }
                                                     }
@@ -739,7 +750,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
 
                                                     if (&row_vals.col == sc_name.as_ref().unwrap()) && (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
                                                         if number_to_check.1 >= number_is_checker.1 { // value from row must be greater or equal to that from query
-                                                            match_success(&mut match_found, op_for_row, &mut s_rows, &mut seeked_rows, row);
+                                                            match_success(&mut match_found, &mut and_con_match_found_in_row, op_for_row, &mut s_rows, &mut seeked_rows, row);
                                                             break;
                                                         }
                                                     }
@@ -749,7 +760,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
 
                                                     if (&row_vals.col == sc_name.as_ref().unwrap()) && (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
                                                         if number_to_check.1 < number_is_checker.1 { // value from row must be greater or equal to that from query
-                                                            match_success(&mut match_found, op_for_row, &mut s_rows, &mut seeked_rows, row);
+                                                            match_success(&mut match_found, &mut and_con_match_found_in_row, op_for_row, &mut s_rows, &mut seeked_rows, row);
                                                             break;
                                                         }
                                                     }
@@ -759,7 +770,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
 
                                                     if (&row_vals.col == sc_name.as_ref().unwrap()) && (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
                                                         if number_to_check.1 <= number_is_checker.1 { // value from row must be greater or equal to that from query
-                                                            match_success(&mut match_found, op_for_row, &mut s_rows, &mut seeked_rows, row);
+                                                            match_success(&mut match_found, &mut and_con_match_found_in_row, op_for_row, &mut s_rows, &mut seeked_rows, row);
                                                             break;
                                                         }
                                                     }
@@ -767,8 +778,22 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                                 _ => () // no handled
                                             }
                                         }
+                                   
+                                        // Add result from condition search from this row
+                                        and_condition_outcomes_from_each_row.push((and_con_match_found_in_row, row.id));
+
+                                        // Add match searched by "OR" condition to not remove by "AND" condition procedure list
+                                        if match_found && it_op_id != 0 && rm[it_op_id - 1].op == BinaryOperator::Or {
+                                            or_exception_for_and_conditions.insert(row.id);
+                                        };
                                     }
 
+                                    // Add this ("loop" block iteration) condition search result from each row to list search outcomes for each condition
+                                        // .. Don't add and condition for Or conjuction operator which preceedes condition or are behind first condition
+                                    if (it_op_id == 0 && rm.len() > 1 && rm[1].op == BinaryOperator::And) || (it_op_id > 0 && rm[it_op_id - 1].op != BinaryOperator::Or) || ((it_op_id > 0 && rm[it_op_id - 1].op == BinaryOperator::And) || (rm.len() > it_op_id + 1 && rm[it_op_id + 1].op == BinaryOperator::And)) {
+                                        and_outcomes_for_all_conditions.push(and_condition_outcomes_from_each_row);
+                                    };
+                                    
                                     // For consistancy: when match wasn't found (cohestive working should be represented in this way)
                                     if !match_found {
                                         op_for_row.perf = Some(false);
@@ -777,15 +802,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
     
                                 // And/Or conditions pissed here
                                 if let BinaryOperator::And = op_for_row.op {
-                                    if rm[it_op_id - 1].perf.is_some() && rm[it_op_id - 1].perf.unwrap() {
-                                        // Performed when: this condition is "And" condition and previous condition was correctly performed
-                                        () // Do nothing... Just go to next iteration (no "continue" statement (because it stop iterations counting hence next iteration will be reffering to this cycle so this made infinite loop))
-                                    }
-                                    else {
-                                        // stop operation in for e.g in case like: previous search operation ends with "false" result because whatever row hasn't been matched to condition 
-                                        op_performed_whole = false; // stop operation further in operation stage
-                                        break; // stop operation further locally
-                                    }
+                                    ()
                                 }
                                 else if let BinaryOperator::Or = op_for_row.op {
                                     () // Do nothing... Just go to next iteration (no "continue" statement (because it stop iterations counting hence next iteration will be reffering to this cycle so this made infinite loop))
@@ -796,22 +813,12 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
 
                                     // When result hasn't been matched in any row by above clousure (enclosed in brackets "{}")
                                     if !match_found {
-                                        if it_op_id > 0 && rm.len() > (it_op_id - 1) && rm[it_op_id - 1].op == BinaryOperator::And {
-                                            // Performed when: this condition hasn't been matched and previous condition was "And" conjuction condition
-                                            op_performed_whole = false;
-                                            break;
+                                        // Specific use cases
+                                        if it_op_id > 0 && rm[it_op_id - 1].op == BinaryOperator::And && (rm.len() > it_op_id + 1 && rm[it_op_id + 1].op == BinaryOperator::Or) {
+                                            // When match hasn't been found for "AND" conjcution but next conjuction is "OR"
+                                            ()
                                         }
-                                        else if rm.len() > (it_op_id + 1) && rm[it_op_id + 1].op != BinaryOperator::Or && rm[it_op_id].op != BinaryOperator::Or { // 
-                                            // Performed when: conditions length this condition hasn't been successfull matched and next conjuction condition isn't "Or" (like it's end condition)
-                                            op_performed_whole = false;
-                                            break;
-                                        }
-                                        else if rm.len() - 1 == it_op_id && (rm[it_op_id].op != BinaryOperator::Or && rm[it_op_id].op != BinaryOperator::And) {
-                                            // Performed when: this condition is last and this condition isn't conjuction condition: And, Or otherwise sql syntax error should be thrown
-                                            op_performed_whole = false;
-                                            break;
-                                        }
-                                    }
+                                    };
                                 }
 
                                 // increase iterated elements colunt
@@ -821,19 +828,56 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                 break;
                             }
                         };
+                        // println!("{:?}", and_outcomes_for_all_conditions);
 
-                        println!("{:?}", seeked_rows);
+                        // Remove matches (rows) which aren't fullfilled for all and conditions
+                        let and_conditions_len = and_outcomes_for_all_conditions.len();
+                        if and_conditions_len > 0 {
+                                // Iterate on only row outcomes for first condition because all conditions must have always same rows count and our aim is to obtain only each row id for code located inside
+                            for f_cond_row in and_outcomes_for_all_conditions[0].iter() {
+                                    //.. Whether in all "AND" conditions this row has been matched
+                                let matches_for_row = and_outcomes_for_all_conditions
+                                    .iter()
+                                    .all(|ocondition| {
+                                        let mut match_found_for_condition: bool = false;
+                                        for (result, id) in ocondition {
+                                            if *id == f_cond_row.1 {
+                                                match_found_for_condition = *result;
+                                            }
+                                        };
+                                        match_found_for_condition
+                                    });
+                                    // Remove row which doesn't match for all "AND" conditions and when row id isn't on "OR" exceptions list
+                                if !matches_for_row {
+                                    // println!("Didn't found match for row: {}\nOr exceptions list: {:?}", f_cond_row.1, or_exception_for_and_conditions);
+                                    for (on_list_id, RowOperationForm { row: _, id: row_id }) in s_rows.clone().iter().enumerate() {
+                                        // When row hasn't been matched, it isn't on or exceptions list and doesn't matched row id is equal to iterated row id on list with seeked rows
+                                        if *row_id == f_cond_row.1 && !or_exception_for_and_conditions.contains(row_id) {
+                                            s_rows.remove(on_list_id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Attach search results to next processing stage (only when where results has been found else return table without rows as a result of function)
                         if s_rows.len() > 0 {
                             std::mem::drop(t_d_rows); // remove prepared rows from memory faster than RAII should do this automatically
-                            matched_rows.extend(s_rows);
+                            matched_rows.extend(
+                                s_rows
+                                        .iter()
+                                        .map(|RowOperationForm { row, id }| {
+                                            row.clone()
+                                        })
+                                        .collect::<Vec<_>>()
+                            );
                         }
                         else {
                             json_t_data.rows = None;
                             return Ok(json_t_data);
                         };
                     }
-                    println!("{:#?}", matched_rows);
+                    // println!("{:#?}", matched_rows);
 
                     // Go ahead only when user pass table column names or "all" option
                     // Send to user only specified by him columns only when user pass these columns
