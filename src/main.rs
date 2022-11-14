@@ -199,7 +199,7 @@ pub mod tests {
                 // ... Operation: DELETE
         // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|DELETE FROM mycat2 WHERE age >= 2;"#, sess_id).as_bytes()).unwrap();
                 // ... Operation: UPDATE
-        connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|UPDATE mycat2 SET name = 'hex', age = 255 WHERE gender = 'male';"#, sess_id).as_bytes()).unwrap();
+        connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|UPDATE mycat2 SET name = 'hex', age = 255;"#, sess_id).as_bytes()).unwrap();
             //... Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf2).expect("Couldn't read server response");

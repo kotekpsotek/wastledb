@@ -1081,214 +1081,256 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
             let table_data = fs::read_to_string(table_path).unwrap();
             let mut json_t_data = serde_json::from_str::<JsonSQLTable>(&table_data).unwrap();
 
-            fn save_updated_table(table: JsonSQLTable, path: &PathBuf) -> Result<(), ()> {
-                let s = serde_json::to_string(&table).unwrap();
-                fs::write(path, s).map_or_else(|_| Err(()), |_| Ok(()))
-            }
-
             // To peroform "update" operation table must have got some rows otherwise will be return table without any rows hence without performed update operation
-            if matches!(json_t_data.rows, Some(_)) && condition.is_some() {
-                let table_rows = json_t_data.rows.clone().unwrap();
-                let table_columns_names = json_t_data.columns.clone().into_iter().map(|column| column.name).collect::<Vec<_>>();
-                let mut prep_rows = table_rows.into_iter()
-                    .enumerate()
-                    .map(|val| {
-                        RowOperationForm {
-                            id: val.0 as u128,
-                            row: val.1.to_owned()
-                        }
-                    })
-                    .collect::<Vec<_>>();
-
-                // Convert condition to more redable form
-                let mut operations_for_row: Vec<RowWhereOperation> = Vec::new(); // [{ column: Some("gender"), value: Some("male"), op: Eq }, { op: And, column: None, value: None }]                   
-                convert_binarop(condition.unwrap(), &mut operations_for_row)?;
-
-                // iterate over conditions and search matches
-                let mut cond_rows_matched_ids: HashSet<u128> = HashSet::new();                
-                for cond in operations_for_row {
-                    if cond.op != BinaryOperator::And && cond.op != BinaryOperator::Or {
-                        let cond_colname = cond.column.unwrap();
-                        let cond_colvalue = cond.value.unwrap();
-                        for prep_row in &prep_rows {
-                            for row in &prep_row.row {
-                                let row_column = row.col.clone();
-                                let row_value = row.value.clone().unwrap(); // FIXME: Null will cause error here!!!
-                                if row_column == cond_colname.clone() {
-                                    let mut when_success_in_match = || {
-                                        cond_rows_matched_ids.insert(prep_row.id);
-                                    };
-
-                                    // Perform specific action and 
-                                    match cond.op {
-                                        BinaryOperator::Eq => { // values must be equal
-                                            if row_value == cond_colvalue {
-                                                when_success_in_match();
-                                            }
-                                        },
-                                        BinaryOperator::NotEq => {
-                                            if row_value != cond_colvalue.clone() {
-                                                when_success_in_match();
-                                            }
-                                        },
-                                        BinaryOperator::Gt => { // value from database must be greater then given
-                                            let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &Some(cond_colname.to_owned()), &Some(cond_colvalue.to_owned()), row); // data required for all numeric operations
-
-                                            if (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
-                                                if number_to_check.1 > number_is_checker.1 {
-                                                    when_success_in_match()
-                                                }
-                                            }
-                                        },
-                                        BinaryOperator::GtEq => {
-                                            let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &Some(cond_colname.to_owned()), &Some(cond_colvalue.to_owned()), row); // data required for all numeric operations
-
-                                            if (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
-                                                if number_to_check.1 >= number_is_checker.1 {
-                                                    when_success_in_match()
-                                                }
-                                            }
-                                        },
-                                        BinaryOperator::Lt => {
-                                            let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &Some(cond_colname.to_owned()), &Some(cond_colvalue.to_owned()), row); // data required for all numeric operations
-
-                                            if (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
-                                                if number_to_check.1 < number_is_checker.1 {
-                                                    when_success_in_match()
-                                                }
-                                            }
-                                        },
-                                        BinaryOperator::LtEq => {
-                                            let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &Some(cond_colname.to_owned()), &Some(cond_colvalue.to_owned()), row); // data required for all numeric operations
-
-                                            if (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
-                                                if number_to_check.1 <= number_is_checker.1 {
-                                                    when_success_in_match()
-                                                }
-                                            }
-                                        }
-                                        _ => () // no handled
+            if matches!(json_t_data.rows, Some(_)) {
+                    // Function to get Assigment value content and assigment value type
+                let get_asg_value = |value| {
+                    let asg_value = {
+                        if let Expr::Value(data_type) = value {
+                            use sqlparser::ast::Value;
+                            match data_type {
+                                Value::Boolean(bool) => Some((bool.to_string(), SupportedSQLDataTypes::BOOLEAN)),
+                                Value::Number(num, _) => Some((num.to_owned(), SupportedSQLDataTypes::INT)),
+                                Value::DoubleQuotedString(stri) | Value::EscapedStringLiteral(stri) | Value::SingleQuotedString(stri) => {
+                                    let stri_data_type = if stri.len() > 65_535 {
+                                        SupportedSQLDataTypes::TEXT
                                     }
-                                }
+                                    else {
+                                        SupportedSQLDataTypes::VARCHAR(None)
+                                    };
+                                    Some((stri.to_owned(), stri_data_type))
+                                },
+                                _ => None
                             }
+                        }
+                        else {
+                            None
+                        }
+                    };
+
+                    asg_value
+                };
+                    // Function checking whether assigment inserted value and its type is correct with table column data type
+                let type_checker: fn(SupportedSQLDataTypes, &SupportedSQLDataTypes, &String) -> bool = |table_column_type, assigment_type, assigment_value| {
+                    if table_column_type == *assigment_type
+                    || ((matches!(table_column_type, SupportedSQLDataTypes::VARCHAR(_)) || table_column_type == SupportedSQLDataTypes::TEXT) && *assigment_type == SupportedSQLDataTypes::INT)
+                    || (matches!(table_column_type, SupportedSQLDataTypes::VARCHAR(_)) && matches!(*assigment_type, SupportedSQLDataTypes::VARCHAR(_))) {
+                        match table_column_type {
+                            SupportedSQLDataTypes::VARCHAR(length) => {
+                                let length = {
+                                    if let Some(len) = length {
+                                        len
+                                    }
+                                    else {
+                                        u16::MAX
+                                    }
+                                };
+                            
+                                // Value inserted to sting column with type Varchar must be smaller then inserted length or pre-defined for u16 type so 65_535
+                                if length as usize >= assigment_value.len() {
+                                    true
+                                }
+                                else {
+                                    false
+                                }
+                            },
+                            SupportedSQLDataTypes::TEXT => {
+                                if assigment_value.len() <= 16_777_215 {
+                                    true
+                                }
+                                else {
+                                    false
+                                }
+                            },
+                            _ => true
                         }
                     }
-                }
-
-                // Search matched rows to conditions and change their values depends on "assigments" 
-                let mut performed_updation = false;
-                for matched_row_id in cond_rows_matched_ids.iter() {
-                    let matched_row = prep_rows.clone().into_iter().enumerate().find(|row_prep| {
-                        if row_prep.1.id == *matched_row_id {
-                            return true
-                        };
+                    else {
                         false
-                    });
-
-                    // Match row signature / whether found row or not
-                    match matched_row {
-                        Some((id_on_list_match, RowOperationForm { row, id: _ })) => {
-                            // Iterate over columns from matched row
-                            for (row_value_id, JsonSQLTableColumnRow { col: table_column_name, value }) in row.into_iter().enumerate() {
-                                // Iterate over assigments in order to find column which must be changed
-                                for Assignment { id: as_column_obj, value } in &assigments {
-                                    // When column name from iterated assigment is same as column name which must change
-                                    if &table_column_name == &as_column_obj[0].value {
-                                            // ... Obtain value and value datatype from assigment
-                                        let asg_value = {
-                                            if let Expr::Value(data_type) = value {
-                                                use sqlparser::ast::Value;
-                                                match data_type {
-                                                    Value::Boolean(bool) => (bool.to_string(), SupportedSQLDataTypes::BOOLEAN),
-                                                    Value::Number(num, _) => (num.to_owned(), SupportedSQLDataTypes::INT),
-                                                    Value::DoubleQuotedString(stri) | Value::EscapedStringLiteral(stri) | Value::SingleQuotedString(stri) => {
-                                                        let stri_data_type = if stri.len() > 65_535 {
-                                                            SupportedSQLDataTypes::TEXT
-                                                        }
-                                                        else {
-                                                            SupportedSQLDataTypes::VARCHAR(None)
-                                                        };
-                                                        (stri.to_owned(), stri_data_type)
-                                                    },
-                                                    _ => break
-                                                }
-                                            }
-                                            else {
-                                                break;
-                                            }
-                                        };
-
-                                            // ... Obtain data type from column and check assigned value data type correcteness respect to table column data type 
-                                        let table_column_type = json_t_data.get_column_type(&table_column_name).expect("Unexpected behaviour!");
-                                        if table_column_type == asg_value.1 
-                                        || ((matches!(table_column_type, SupportedSQLDataTypes::VARCHAR(_)) || table_column_type == SupportedSQLDataTypes::TEXT) && asg_value.1 == SupportedSQLDataTypes::INT)
-                                        || (matches!(table_column_type, SupportedSQLDataTypes::VARCHAR(_)) && matches!(asg_value.1, SupportedSQLDataTypes::VARCHAR(_))) {
-                                            // More accurate type checking
-                                            let allow_update = {
-                                                match table_column_type {
-                                                    SupportedSQLDataTypes::VARCHAR(length) => {
-                                                        let length = {
-                                                            if let Some(len) = length {
-                                                                len
-                                                            }
-                                                            else {
-                                                                u16::MAX
-                                                            }
-                                                        };
-
-                                                        // Value inserted to sting column with type Varchar must be smaller then inserted length or pre-defined for u16 type so 65_535
-                                                        if length as usize >= asg_value.0.len() {
-                                                            true
-                                                        }
-                                                        else {
-                                                            false
-                                                        }
-                                                    },
-                                                    SupportedSQLDataTypes::TEXT => {
-                                                        if asg_value.0.len() <= 16_777_215 {
-                                                            true
-                                                        }
-                                                        else {
-                                                            false
-                                                        }
-                                                    },
-                                                    _ => true
-                                                }
-                                            };
-
-                                            // Update row value when above type checker allow for that
-                                            if allow_update {
-                                                prep_rows[id_on_list_match].row[row_value_id].value = Some(asg_value.0);
-                                                performed_updation = true;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        None => break
                     }
                 };
-                
-                // If condition has been matched and updated then return table with updated data otherwise branchback not updated table
-                // When not updated table was returned that can means that assigment has column names which aren't table columns
-                if performed_updation {
-                    Ok(
-                        JsonSQLTable { 
-                            rows: {
-                                let acceptable_row_fmt = prep_rows.into_iter().map(|row| row.row).collect::<Vec<_>>();
-                                Some(acceptable_row_fmt)
-                            },
-                            ..json_t_data
+
+                // When conditions has been passed update only specific row otheriwse update all rows
+                if condition.is_some() {
+                    // Update only specific rows (matched by condition from 'WHERE' statement)
+                    let table_rows = json_t_data.rows.clone().unwrap();
+                    let table_columns_names = json_t_data.columns.clone().into_iter().map(|column| column.name).collect::<Vec<_>>();
+                    let mut prep_rows = table_rows.into_iter()
+                        .enumerate()
+                        .map(|val| {
+                            RowOperationForm {
+                                id: val.0 as u128,
+                                row: val.1.to_owned()
+                            }
+                        })
+                        .collect::<Vec<_>>();
+    
+                    // Convert condition to more redable form
+                    let mut operations_for_row: Vec<RowWhereOperation> = Vec::new(); // [{ column: Some("gender"), value: Some("male"), op: Eq }, { op: And, column: None, value: None }]                   
+                    convert_binarop(condition.unwrap(), &mut operations_for_row)?;
+    
+                    // iterate over conditions and search matches
+                    let mut cond_rows_matched_ids: HashSet<u128> = HashSet::new();                
+                    for cond in operations_for_row {
+                        if cond.op != BinaryOperator::And && cond.op != BinaryOperator::Or {
+                            let cond_colname = cond.column.unwrap();
+                            let cond_colvalue = cond.value.unwrap();
+                            for prep_row in &prep_rows {
+                                for row in &prep_row.row {
+                                    let row_column = row.col.clone();
+                                    let row_value = row.value.clone().unwrap(); // FIXME: Null will cause error here!!!
+                                    if row_column == cond_colname.clone() {
+                                        let mut when_success_in_match = || {
+                                            cond_rows_matched_ids.insert(prep_row.id);
+                                        };
+    
+                                        // Perform specific action and 
+                                        match cond.op {
+                                            BinaryOperator::Eq => { // values must be equal
+                                                if row_value == cond_colvalue {
+                                                    when_success_in_match();
+                                                }
+                                            },
+                                            BinaryOperator::NotEq => {
+                                                if row_value != cond_colvalue.clone() {
+                                                    when_success_in_match();
+                                                }
+                                            },
+                                            BinaryOperator::Gt => { // value from database must be greater then given
+                                                let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &Some(cond_colname.to_owned()), &Some(cond_colvalue.to_owned()), row); // data required for all numeric operations
+    
+                                                if (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
+                                                    if number_to_check.1 > number_is_checker.1 {
+                                                        when_success_in_match()
+                                                    }
+                                                }
+                                            },
+                                            BinaryOperator::GtEq => {
+                                                let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &Some(cond_colname.to_owned()), &Some(cond_colvalue.to_owned()), row); // data required for all numeric operations
+    
+                                                if (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
+                                                    if number_to_check.1 >= number_is_checker.1 {
+                                                        when_success_in_match()
+                                                    }
+                                                }
+                                            },
+                                            BinaryOperator::Lt => {
+                                                let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &Some(cond_colname.to_owned()), &Some(cond_colvalue.to_owned()), row); // data required for all numeric operations
+    
+                                                if (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
+                                                    if number_to_check.1 < number_is_checker.1 {
+                                                        when_success_in_match()
+                                                    }
+                                                }
+                                            },
+                                            BinaryOperator::LtEq => {
+                                                let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &Some(cond_colname.to_owned()), &Some(cond_colvalue.to_owned()), row); // data required for all numeric operations
+    
+                                                if (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
+                                                    if number_to_check.1 <= number_is_checker.1 {
+                                                        when_success_in_match()
+                                                    }
+                                                }
+                                            }
+                                            _ => () // no handled
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    )
+                    }
+    
+                    // Search matched rows to conditions and change their values depends on "assigments" 
+                    let mut performed_updation = false;
+                    for matched_row_id in cond_rows_matched_ids.iter() {
+                        let matched_row = prep_rows.clone().into_iter().enumerate().find(|row_prep| {
+                            if row_prep.1.id == *matched_row_id {
+                                return true
+                            };
+                            false
+                        });
+    
+                        // Match row signature / whether found row or not
+                        match matched_row {
+                            Some((id_on_list_match, RowOperationForm { row, id: _ })) => {
+                                // Iterate over columns from matched row
+                                for (row_value_id, JsonSQLTableColumnRow { col: table_column_name, value }) in row.into_iter().enumerate() {
+                                    // Iterate over assigments in order to find column which must be changed
+                                    for Assignment { id: as_column_obj, value } in &assigments {
+                                        // When column name from iterated assigment is same as column name which must change
+                                        if &table_column_name == &as_column_obj[0].value {
+                                                // ... Obtain value and value datatype from assigment   
+                                                // ... Get Assigment value and value type               
+                                            match get_asg_value(value.to_owned()) {
+                                                Some(asg_value) => {
+                                                    // ... Obtain data type from column and check assigned value data type correcteness respect to table column data type 
+                                                    let table_column_type = json_t_data.get_column_type(&table_column_name).expect("Unexpected behaviour!");
+                                                    if type_checker(table_column_type, &asg_value.1, &asg_value.0) {
+                                                        prep_rows[id_on_list_match].row[row_value_id].value = Some(asg_value.0);
+                                                        performed_updation = true;
+                                                    }
+                                                },
+                                                None => break
+                                            };
+                                        }
+                                    }
+                                }
+                            },
+                            None => break
+                        }
+                    };
+                    
+                    // If condition has been matched and updated then return table with updated data otherwise branchback not updated table
+                    // When not updated table was returned that can means that assigment has column names which aren't table columns
+                    if performed_updation {
+                        Ok(
+                            JsonSQLTable { 
+                                rows: {
+                                    let acceptable_row_fmt = prep_rows.into_iter().map(|row| row.row).collect::<Vec<_>>();
+                                    Some(acceptable_row_fmt)
+                                },
+                                ..json_t_data
+                            }
+                        )
+                    }
+                    else {
+                        Ok(json_t_data)
+                    }
                 }
                 else {
+                    // Update all rows which will be match to rows
+
+                    // Iterate over each table row and his id
+                    for table_row in json_t_data.rows.clone().unwrap().into_iter().enumerate() {
+                        // Iterate over each table row column and its id in row
+                        for table_row_column in table_row.1.into_iter().enumerate() {
+                            let table_row_column_name = (table_row_column.1).col;
+                            // Iterate over each assigment from 'SET'
+                            for Assignment { id: assigment_column_object, value } in &assigments {
+                                if table_row_column_name == assigment_column_object[0].value {
+                                        // ... Obtain value and value datatype from assigment 
+                                        // ... Get Assigment value and value type               
+                                    match get_asg_value(value.to_owned()) {
+                                        Some(asg_value) => {
+                                            // Update row value
+                                            let table_column_type = json_t_data.get_column_type(&table_row_column_name).expect("Unexpected behaviour!");
+                                            if type_checker(table_column_type, &asg_value.1, &asg_value.0) {
+                                                json_t_data.rows.as_mut().unwrap()[table_row.0][table_row_column.0].value = Some(asg_value.0);
+                                            };
+                                        },
+                                        None => break
+                                    };
+                                };
+                            };
+                        };
+                    };
+
+                    // Return table with or without updated rows (for loop cannot edit any row when appropriate environment variable will be fullfiled)
                     Ok(json_t_data)
                 }
             }
             else {
-                Err(())
+                Ok(json_t_data)
             }
         }
     }
