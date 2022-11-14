@@ -148,7 +148,8 @@ pub enum ProcessSQLSupportedQueries<'x> {
         )>,
     ), // 1. Table name, 2. Vector with table columns and characteristic for each column
     Truncate(TablePath<'x>),
-    Select(TablePath<'x>, ActionOnlyForTheseColumns, Option<Expr>) // path to table, 2. return results for specific record tuples can be all, 3. Select only these records
+    Select(TablePath<'x>, ActionOnlyForTheseColumns, Option<Expr>), // path to table, 2. return results for specific record tuples can be all, 3. Select only these records
+    Delete(TablePath<'x>, Option<Expr>) // Delete whole table records or only specific record
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +163,109 @@ struct RowWhereOperation {
     op: BinaryOperator,
     /// in match operation indicates whether operation has been successfullperformed
     perf: Option<bool>
+}
+
+#[derive(Debug, Clone)]
+/// Store table row as prepared for actions with conditions
+struct RowOperationForm {
+    row: Vec<JsonSQLTableColumnRow>,
+    id: u128
+}
+
+/// Convert Conditions to more readable and oparatable form. Longer: Function which aim is convert Expr::BinOp to RowWhereOperation expression and put it into "operations_for_row" collection to facilitate performant 'WHERE' computing
+fn convert_binarop(expr: Expr, converted_list: &mut Vec<RowWhereOperation>) -> Result<(), ()> {
+    if let Expr::BinaryOp { left, op, right } = expr { // for parent
+        /// To convert expression witch doesn't rollup further to conjuction (And, Or) 
+        fn for_value_and_column(op_row_collection: &mut Vec<RowWhereOperation>, right: &Box<Expr>, left: &Box<Expr>, op: &BinaryOperator) -> Result<(), ()> {
+            let no_rollup_cond = RowWhereOperation {
+                column: { // column "name"
+                    match &**left {
+                        Expr::Identifier(d) => {
+                            Some(d.value.clone())
+                        },
+                        _ => return Err(()) // incorrect parsed condition
+                    }
+                },
+                op: op.clone(), // operation type like: Eq, NotEq, Less , ...
+                value: { // column "value"
+                    match &**right {
+                        Expr::Identifier(d) => {
+                            Some(d.value.clone())
+                        },
+                        Expr::Value(value) => {
+                            match value {
+                                SQLParserValue::SingleQuotedString(sval) | SQLParserValue::DoubleQuotedString(sval) => Some(sval.to_owned()),
+                                SQLParserValue::Number(num, _) => {
+                                    Some(num.clone())
+                                },
+                                SQLParserValue::Boolean(boolval) => Some(boolval.to_string()),
+                                SQLParserValue::Null => Some(String::from("null")),
+                                _ => return Err(())
+                            }
+                        },
+                        _ => return Err(()) // incorrect parsed condition
+                    }
+                },
+                perf: None
+            };
+
+            // Add condition part to list
+            op_row_collection.push(no_rollup_cond);
+
+            // Performed indicator result
+            Ok(())
+        }
+        
+        /// Appropriate action to appropriate outcome
+        match op {
+            BinaryOperator::And | BinaryOperator::Or => { // for multiple blocks // in that case "left" and "right" keys allways represents next "BinaryOp" struct
+                // left
+                convert_binarop(*left, converted_list)?;
+
+                // Add conjuction
+                let conjuction = RowWhereOperation {
+                    column: None,
+                    value: None,
+                    op: op.clone(),
+                    perf: None
+                };
+                converted_list.push(conjuction);
+
+                // right
+                convert_binarop(*right, converted_list)?;
+
+                // Result
+                Ok(())
+            }, 
+            _ => for_value_and_column(converted_list, &right, &left, &op) // for row operations   
+        }
+    }
+    else {
+        // No-predicted behave
+        Err(())
+    }
+}
+
+// Obtain all actions requied for match conditions such as: column data type, number from row, searched number
+type Comparision = (bool, i128);
+fn numeric_matches(json_t_data: &JsonSQLTable, col_name: &Option<String>, col_value: &Option<String>, row_vals: &JsonSQLTableColumnRow) -> (Option<SupportedSQLDataTypes>, Comparision, Comparision) {
+    let column_type = json_t_data.get_column_type(col_name.as_ref().unwrap());  // column name always should be provided
+    let number_is_checker = col_value.as_ref().map_or_else(|| (false, 0), |success| {
+        let parse_op = success.parse::<i128>();
+        match parse_op {
+            Ok(num) => (true, num),
+            Err(_) => (false, 0)
+        }
+    });
+    let number_to_check = row_vals.value.as_ref().map_or_else(|| (false, 0), |success| {
+        let parse_op = success.parse::<i128>();
+        match parse_op {
+            Ok(num) => (true, num),
+            Err(_) => (false, 0)
+        }
+    });
+
+    (column_type, number_is_checker, number_to_check)
 }
 
 /// Processing attached SQL query and returns its result as "JsonSQLTable" type ready to serialize, to json format thanks to "serde" and "serde_json" crates
@@ -529,11 +633,6 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
 
             if t_d_rows.is_some() {
                     // Attach to each row table unique id
-                #[derive(Debug, Clone)]
-                struct RowOperationForm {
-                    row: Vec<JsonSQLTableColumnRow>,
-                    id: u128
-                }
                 let mut id_operation_row = 0 as u128;
                 let mut t_d_rows = t_d_rows /* prepare each table row for search match operation */
                     .as_mut()
@@ -575,80 +674,6 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                     if let Some(expr_conditions) = conditions {
                         // list with converted expressions from 'WHERE'
                         let mut operations_for_row: Vec<RowWhereOperation> = Vec::new(); // [{ column: Some("gender"), value: Some("male"), op: Eq }, { op: And, column: None, value: None }]
-
-                        /// Function for convert Expr::BinOp to RowWhereOperation expression and put it into "operations_for_row" collection to facilitate performant 'WHERE' computing
-                        fn convert_binarop(expr: Expr, converted_list: &mut Vec<RowWhereOperation>) -> Result<(), ()> {
-                            if let Expr::BinaryOp { left, op, right } = expr { // for parent
-                                /// To convert expression witch doesn't rollup further to conjuction (And, Or) 
-                                fn for_value_and_column(op_row_collection: &mut Vec<RowWhereOperation>, right: &Box<Expr>, left: &Box<Expr>, op: &BinaryOperator) -> Result<(), ()> {
-                                    let no_rollup_cond = RowWhereOperation {
-                                        column: { // column "name"
-                                            match &**left {
-                                                Expr::Identifier(d) => {
-                                                    Some(d.value.clone())
-                                                },
-                                                _ => return Err(()) // incorrect parsed condition
-                                            }
-                                        },
-                                        op: op.clone(), // operation type like: Eq, NotEq, Less , ...
-                                        value: { // column "value"
-                                            match &**right {
-                                                Expr::Identifier(d) => {
-                                                    Some(d.value.clone())
-                                                },
-                                                Expr::Value(value) => {
-                                                    match value {
-                                                        SQLParserValue::SingleQuotedString(sval) | SQLParserValue::DoubleQuotedString(sval) => Some(sval.to_owned()),
-                                                        SQLParserValue::Number(num, _) => {
-                                                            Some(num.clone())
-                                                        },
-                                                        SQLParserValue::Boolean(boolval) => Some(boolval.to_string()),
-                                                        SQLParserValue::Null => Some(String::from("null")),
-                                                        _ => return Err(())
-                                                    }
-                                                },
-                                                _ => return Err(()) // incorrect parsed condition
-                                            }
-                                        },
-                                        perf: None
-                                    };
-
-                                    // Add condition part to list
-                                    op_row_collection.push(no_rollup_cond);
-
-                                    // Performed indicator result
-                                    Ok(())
-                                }
-                                
-                                /// Appropriate action to appropriate outcome
-                                match op {
-                                    BinaryOperator::And | BinaryOperator::Or => { // for multiple blocks // in that case "left" and "right" keys allways represents next "BinaryOp" struct
-                                        // left
-                                        convert_binarop(*left, converted_list)?;
-
-                                        // Add conjuction
-                                        let conjuction = RowWhereOperation {
-                                            column: None,
-                                            value: None,
-                                            op: op.clone(),
-                                            perf: None
-                                        };
-                                        converted_list.push(conjuction);
-
-                                        // right
-                                        convert_binarop(*right, converted_list)?;
-
-                                        // Result
-                                        Ok(())
-                                    }, 
-                                    _ => for_value_and_column(converted_list, &right, &left, &op) // for row operations   
-                                }
-                            }
-                            else {
-                                // No-predicted behave
-                                Err(())
-                            }
-                        }
 
                         // Convert whole to expected form
                         convert_binarop(expr_conditions, &mut operations_for_row)?;
@@ -697,28 +722,6 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                                     s_rows.push(row.clone()); // attach seeked row to seeked rows list
                                                     matched_rows_list.push(row.id); // attach row id to matched rows list
                                                 }
-                                            }
-
-                                            // Obtain all actions requied for match conditions such as: column data type, number from row, searched number
-                                            type Comparision = (bool, i128);
-                                            fn numeric_matches(json_t_data: &JsonSQLTable, sc_name: &Option<String>, sc_val: &Option<String>, row_vals: &JsonSQLTableColumnRow) -> (Option<SupportedSQLDataTypes>, Comparision, Comparision) {
-                                                let column_type = json_t_data.get_column_type(sc_name.as_ref().unwrap());  // column name always should be provided
-                                                let number_is_checker = sc_val.as_ref().map_or_else(|| (false, 0), |success| {
-                                                    let parse_op = success.parse::<i128>();
-                                                    match parse_op {
-                                                        Ok(num) => (true, num),
-                                                        Err(_) => (false, 0)
-                                                    }
-                                                });
-                                                let number_to_check = row_vals.value.as_ref().map_or_else(|| (false, 0), |success| {
-                                                    let parse_op = success.parse::<i128>();
-                                                    match parse_op {
-                                                        Ok(num) => (true, num),
-                                                        Err(_) => (false, 0)
-                                                    }
-                                                });
-
-                                                (column_type, number_is_checker, number_to_check)
                                             }
 
                                             // Perform specific action abd add positive match result to results list
@@ -852,7 +855,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                     // println!("Didn't found match for row: {}\nOr exceptions list: {:?}", f_cond_row.1, or_exception_for_and_conditions);
                                     for (on_list_id, RowOperationForm { row: _, id: row_id }) in s_rows.clone().iter().enumerate() {
                                         // When row hasn't been matched, it isn't on or exceptions list and doesn't matched row id is equal to iterated row id on list with seeked rows
-                                        if *row_id == f_cond_row.1 && !or_exception_for_and_conditions.contains(row_id) {
+                                        if *row_id == f_cond_row.1 && !or_exception_for_and_conditions.contains(&row_id) {
                                             s_rows.remove(on_list_id);
                                         }
                                     }
@@ -930,6 +933,146 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
             else {
                 // Return table withput rows // with null benath "rows" key
                 return Ok(json_t_data)
+            }
+        },
+        Delete(table_path, condition) => {
+            // Delete matched rows from table and return deleted rows
+            let table_data = fs::read_to_string(table_path).unwrap();
+            let mut json_t_data = serde_json::from_str::<JsonSQLTable>(&table_data).unwrap();
+
+            fn save_updated_table(table: JsonSQLTable, path: &PathBuf) -> Result<(), ()> {
+                let s = serde_json::to_string(&table).unwrap();
+                fs::write(path, s).map_or_else(|_| Err(()), |_| Ok(()))
+            }
+
+            // To peroform delete operation table must have got some rows otherwise will be return table without any rows
+            if let Some(rows_set) = &json_t_data.rows {
+                match condition {
+                    Some(condition_body) => {
+                        // list with converted expressions from 'WHERE'
+                        let mut operations_for_row: Vec<RowWhereOperation> = Vec::new(); // [{ column: Some("gender"), value: Some("male"), op: Eq }, { op: And, column: None, value: None }]                   
+                        let mut prep_rows = rows_set.into_iter()
+                            .enumerate()
+                            .map(|val| {
+                                RowOperationForm {
+                                    id: val.0 as u128,
+                                    row: val.1.to_owned()
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        // Convert whole to expected form
+                        convert_binarop(condition_body, &mut operations_for_row)?;
+                        let mut rows_to_delete: HashSet<u128> = HashSet::new(); // store only unique identificators for rows
+                        // iterate over conditions and search matches
+                        for cond in operations_for_row {
+                            if cond.op != BinaryOperator::And && cond.op != BinaryOperator::Or {
+                                    let cond_colname = cond.column.unwrap();
+                                    let cond_colvalue = cond.value.unwrap();
+                                    for prep_row in &prep_rows {
+                                        for row in &prep_row.row {
+                                            let row_column = row.col.clone();
+                                            let row_value = row.value.clone().unwrap(); // FIXME: Null will cause error here!!!
+                                            if row_column == cond_colname.clone() {
+                                                let mut when_success_in_match = || {
+                                                    rows_to_delete.insert(prep_row.id);
+                                                };
+    
+                                                // Perform specific action and 
+                                                match cond.op {
+                                                    BinaryOperator::Eq => { // values must be equal
+                                                        if row_value == cond_colvalue {
+                                                            when_success_in_match();
+                                                        }
+                                                    },
+                                                    BinaryOperator::NotEq => {
+                                                        if row_value != cond_colvalue.clone() {
+                                                            when_success_in_match();
+                                                        }
+                                                    },
+                                                    BinaryOperator::Gt => { // value from database must be greater then given
+                                                        let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &Some(cond_colname.to_owned()), &Some(cond_colvalue.to_owned()), row); // data required for all numeric operations
+    
+                                                        if (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
+                                                            if number_to_check.1 > number_is_checker.1 {
+                                                                when_success_in_match()
+                                                            }
+                                                        }
+                                                    },
+                                                    BinaryOperator::GtEq => {
+                                                        let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &Some(cond_colname.to_owned()), &Some(cond_colvalue.to_owned()), row); // data required for all numeric operations
+    
+                                                        if (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
+                                                            if number_to_check.1 >= number_is_checker.1 {
+                                                                when_success_in_match()
+                                                            }
+                                                        }
+                                                    },
+                                                    BinaryOperator::Lt => {
+                                                        let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &Some(cond_colname.to_owned()), &Some(cond_colvalue.to_owned()), row); // data required for all numeric operations
+    
+                                                        if (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
+                                                            if number_to_check.1 < number_is_checker.1 {
+                                                                when_success_in_match()
+                                                            }
+                                                        }
+                                                    },
+                                                    BinaryOperator::LtEq => {
+                                                        let (column_type, number_is_checker, number_to_check) = numeric_matches(&json_t_data, &Some(cond_colname.to_owned()), &Some(cond_colvalue.to_owned()), row); // data required for all numeric operations
+    
+                                                        if (column_type.is_some() && column_type.unwrap() == SupportedSQLDataTypes::INT) && (number_is_checker.0 && number_to_check.0) {
+                                                            if number_to_check.1 <= number_is_checker.1 {
+                                                                when_success_in_match()
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => () // no handled
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                        }
+                        // Delete rows which matches to query and add them to list collected deleted rows
+                        let mut deleted_rows: Vec<Vec<JsonSQLTableColumnRow>> = Vec::new(); // list with deleted rows
+                        for row_id_to_delete in rows_to_delete {
+                            prep_rows.clone().into_iter().enumerate().for_each(|prep_orow| {
+                                if prep_orow.1.id == row_id_to_delete {
+                                    deleted_rows.push(prep_orow.1.row);
+                                    prep_rows.remove(prep_orow.0);
+                                };
+                            })
+                        };
+                        // Save table without deleted rows
+                        let table_content = serde_json::to_string::<JsonSQLTable>(&JsonSQLTable { 
+                            rows: {
+                                let prep = prep_rows.into_iter()
+                                    .map(|row| row.row)
+                                    .collect::<Vec<_>>();
+                                if prep.len() > 0 {
+                                    Some(prep)
+                                }
+                                else {
+                                    None
+                                }
+                            }, 
+                            ..json_t_data.clone()
+                        }).unwrap(); // Assumes that table content always has got correct JSON syntax
+                        fs::write(table_path, table_content);
+                        // Return table with deleted rows
+                        json_t_data.rows = Some(deleted_rows);
+                        return Ok(json_t_data)
+                    },
+                    None => {
+                        // Delete all rows from table
+                        let table_before_rows_deletion = json_t_data.clone();
+                        json_t_data.rows = None;
+                        save_updated_table(json_t_data, table_path)?;
+                        Ok(table_before_rows_deletion)
+                    }
+                }
+            }
+            else {
+                Ok(json_t_data)
             }
         }
     }

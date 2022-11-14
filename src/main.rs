@@ -195,7 +195,9 @@ pub mod tests {
                 // ... Operation: Drop
         // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|DROP TABLE mycat"#, sess_id).as_bytes()).unwrap();
                 // ... Operation: SELECT
-        connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|SELECT * FROM mycat2 WHERE age = 5 AND name = kika OR age = 2;"#, sess_id).as_bytes()).unwrap();
+        // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|SELECT * FROM mycat2 WHERE age = 5 AND name = kika OR age = 2;"#, sess_id).as_bytes()).unwrap();
+                // ... Operation: DELETE
+        connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|DELETE FROM mycat2;"#, sess_id).as_bytes()).unwrap();
             //... Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf2).expect("Couldn't read server response");

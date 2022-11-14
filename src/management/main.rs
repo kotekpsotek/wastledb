@@ -550,6 +550,39 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                             _ => break Error(f!("Not supported query"))
                         };
                     },
+                    Statement::Delete { table_name, using: _, selection: condition } => {
+                        if let Some(db) = get_database_user_connected_to(sessions, &session_id) {
+                            let table_name = {
+                                if let TableFactor::Table { name, alias: _, args: _, with_hints: _ } = table_name {
+                                    (name.0)[0].value.clone()
+                                }
+                                else {
+                                    return Error(f!("Couldn't perform query"))
+                                }
+                            };
+    
+                            let table_path = get_dbtable_path(&db, &table_name);
+                            if table_path.exists() {
+                                match process_sql(ProcessSQLSupportedQueries::Delete(&table_path, condition)) {
+                                    Ok(deleted_rows) => {
+                                        // Send only deleted rows
+                                        // Table without deleted rows is creating into process_sql function especially for it
+                                        match serde_json::to_string(&deleted_rows.rows) {
+                                            Ok(rows) => break Success(Some(rows)),
+                                            Err(_) => break Error(f!("SQL query couldn't been performed"))
+                                        }
+                                    },
+                                    Err(_) => break Error(f!("SQL query couldn't been performed"))
+                                }
+                            }
+                            else {
+                                break Error(f!("Table given by you doesn't exists in database to which you're connected"));
+                            }
+                        }
+                        else {
+                            break Error(f!("You're not connected to database"));
+                        }
+                    }
                     _ => {
                         if parse_op_result.len() > it {
                             continue;
