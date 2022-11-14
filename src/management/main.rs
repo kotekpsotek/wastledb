@@ -51,7 +51,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
             let mut it = 0;
             loop {
                 let lexical_sql = parse_op_result[it].clone();
-                // println!("\nQuery:\n\n{:?}", lexical_sql);
+                // println!("\nQuery:\n\n{:#?}", lexical_sql);
                 it += 1;
 
                 // Do specific action
@@ -582,7 +582,39 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                         else {
                             break Error(f!("You're not connected to database"));
                         }
-                    }
+                    },
+                    Statement::Update { table, assignments: set, from: _, selection: condition } => {
+                        if let Some(db) = get_database_user_connected_to(sessions, &session_id) {
+                            let table_name = if let TableFactor::Table { name, alias: _, args: _, with_hints: _ } = table.relation {
+                                (name.0)[0].value.clone()
+                            }
+                            else {
+                                break Error(f!("Couldn't perform query"));
+                            };
+
+                            let table_path = get_dbtable_path(&db, &table_name);
+                            if table_path.exists() {
+                                // When table wasn''t updated from some logical manner then unupdated table will be returned 
+                                match process_sql(ProcessSQLSupportedQueries::Update(&table_path, set, condition)) {
+                                    Ok(updated_or_not_table) => {
+                                        // Re-save regardless on that it has been updated or not
+                                        let updated_table_stri = serde_json::to_string(&updated_or_not_table).unwrap();
+                                        match fs::write(table_path, &updated_table_stri) {
+                                            Ok(_) => break Success(Some(serde_json::to_string(&updated_or_not_table.rows.unwrap()).unwrap())),
+                                            Err(_) => break Error(f!("SQL query couldn't been performed"))
+                                        }
+                                    },
+                                    Err(_) => break Error(f!("SQL query couldn't been performed"))
+                                }
+                            }
+                            else {
+                                break Error(f!("Table given by you doesn't exists in database to which you're connected"));
+                            }
+                        }
+                        else {
+                            break Error(f!("You're not connected to database"));
+                        }
+                    },
                     _ => {
                         if parse_op_result.len() > it {
                             continue;
