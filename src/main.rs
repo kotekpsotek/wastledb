@@ -210,6 +210,33 @@ pub mod tests {
     }
 
     #[test]
+    fn tcp_show_cmd() {
+        // First call = Register user
+        let registered_response = register_user_by_tcp();
+            //... session id in form without \0 (empty) characters
+        let sess_id = parse_register_response_body(registered_response).0;
+
+        // Second call (source)
+        let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
+
+        // Request
+            // Show dbs databases
+        // connection.write(f!(r#"Show;session_id|x=x|{} 1-1 what|x=x|databases 1-1 unit_name|x=x|none"#, sess_id).as_bytes()).unwrap();
+            // Show database tables
+        // connection.write(f!(r#"Show;session_id|x=x|{} 1-1 what|x=x|database_tables 1-1 unit_name|x=x|none"#, sess_id).as_bytes()).unwrap();
+            // Show specific table data
+        connection.write(f!(r#"Show;session_id|x=x|{} 1-1 what|x=x|table_records 1-1 unit_name|x=x|mycat2"#, sess_id).as_bytes()).unwrap();
+        
+
+        // Response
+        let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
+        connection.read(&mut buf2).expect("Couldn't read server response");
+            // Parse response buf to String
+        let resp2_str = String::from_utf8(buf2.to_vec()).unwrap();
+        println!("{}", resp2_str)
+    }
+
+    #[test]
     fn test_authenticate_user() {
         let test_login = "tester".to_string();
         let test_password = "1234567890".to_string();

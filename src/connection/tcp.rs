@@ -12,7 +12,8 @@ use {
     std::collections::HashMap,
     std::time::SystemTime,
     std::path::Path,
-    std::sync::{Arc, Mutex}
+    std::sync::{Arc, Mutex},
+    std::fs::{self, DirEntry}
 };
 use datafusion::parquet::data_type::AsBytes;
 use generic_array::{ typenum::{ UInt, UTerm, B1, B0 }, GenericArray};
@@ -20,6 +21,7 @@ use login_system::authenticate_user;
 use uuid::{Uuid, timestamp};
 use tokio;
 use crate::inter;
+use serde_json::json; // json macro to create JSON object
 use management::main::Outcomes::*;             
 use rsa::{self, RsaPrivateKey, RsaPublicKey, pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, DecodeRsaPrivateKey, DecodeRsaPublicKey}, PublicKeyParts, PublicKey, PaddingScheme};
 use rand::{self, Rng};
@@ -115,7 +117,13 @@ impl ResponseTypes {
                 result_message = String::from("IncLogin;Null")
             }
             else if matches!(self, ResponseTypes::Error(ErrorResponseKinds::CouldntPerformQuery(_))) { // when query couldn't be performed
-                result_message = format!("Couldn't perform query") // TODO: add reason from "ErrorResponseKinds::CouldntPerformQuery(_)" (is in omitted place by "_")
+                // Add reason or assign default reason
+                result_message = match self {
+                    ResponseTypes::Error(ErrorResponseKinds::CouldntPerformQuery(reason)) => {
+                        format!("Err;{}", reason.to_owned())
+                    },
+                    _ => format!("Err;Couldn't perform query")
+                }
             }
         }
         else if matches!(self, ResponseTypes::Success(_)) { // handle success responses
@@ -184,9 +192,11 @@ enum CommandTypes {
     Register,
     Command,
     KeepAlive,
+    Show,
     RegisterRes(LoginCommandData), // Result of parsing "Register" command recognizer prior as "Register" child
     KeepAliveRes(String, u128), // 1. Is for id of session retrived from msg_body, 2. Is for parse KeepAlive result where "u128" is generated timestamp of parse generation
-    CommandRes(String) // 1. SQL query content is attached under
+    CommandRes(String), // 1. SQL query content is attached under
+    ShowRes(String) // Outcome to show into String type
 }
 
 #[derive(Debug)]
@@ -380,6 +390,161 @@ impl CommandTypes {
                 else {
                     Err(ErrorResponseKinds::IncorrectRequest)
                 }
+            }
+            else {
+                Err(ErrorResponseKinds::IncorrectRequest)
+            }
+        }
+        else if matches!(self, Self::Show) { // display tables list on database or specific table content
+            let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
+            if msg_body_sep.len() == 3 { // msg body must include 3 keys in same order as entered here: 1. session_id|x=x|sessionID 2. what|x=x|database_tables/table 3. unit_name|x=x|database_name/table_name
+                let session_key = self.clone().parse_key_value(msg_body_sep[0]);
+                let what_key_val = self.clone().parse_key_value(msg_body_sep[1]);
+                let what_unit = self.clone().parse_key_value(msg_body_sep[2]);
+
+                // Check whether session was attached and prior initialized
+                if session_key.is_some() {
+                    let session_key = session_key.unwrap();
+                    if session_key.name == "session_id" {
+                        if let Some(session) = sessions.unwrap().get(session_key.value) {
+                            // Compute command body
+                            if what_key_val.is_some() && what_unit.is_some() {
+                                let what_key_val = what_key_val.unwrap();
+                                let what_unit = what_unit.unwrap();
+
+                                // Clousure to check whether user is connected to database and that database name
+                                let user_conn_t_db = || {
+                                    let session_dat_des = serde_json::from_str::<SessionData>(&session).unwrap();
+                                    match session_dat_des.connected_to_database {
+                                        Some(db_name) => {
+                                            (true, db_name)
+                                        },
+                                        None => (false, String::new())
+                                    }
+                                };
+
+                                if what_key_val.name == "what" && what_unit.name == "unit_name" {
+                                    match what_key_val.value {
+                                        "database_tables" => {
+                                            // User must be connected to specific database prior
+                                            let chckdb = user_conn_t_db();
+                                            if chckdb.0 {
+                                                // Show all database tables
+                                                let path_str = format!("../source/dbs/{db}", db = chckdb.1);
+                                                let path = Path::new(&path_str);
+                                                
+                                                if path.exists() {
+                                                    let mut table_names = vec![] as Vec<String>; // only correct tables names without .json extension
+                                                    for entry in fs::read_dir(path).unwrap() {
+                                                        let entry = entry.unwrap().path();
+
+                                                        if entry.is_file() {
+                                                            let et_n_s = entry.file_name().unwrap().to_str().unwrap().split(".").collect::<Vec<_>>();
+
+                                                            if et_n_s.len() > 0 && *et_n_s.last().unwrap() == "json" {
+                                                                table_names.push(et_n_s[..(et_n_s.len() - 1)].join(".")) // add table name without .json extension
+                                                            }
+                                                        }
+                                                    };
+                                                
+                                                    Ok(
+                                                        CommandTypes::ShowRes(
+                                                            json!({
+                                                                "tables": table_names
+                                                            })
+                                                            .to_string()
+                                                        )    
+                                                    )
+                                                }
+                                                else {
+                                                    Err(ErrorResponseKinds::CouldntPerformQuery("Entered database doesn't exists".to_string()))
+                                                }
+                                            }
+                                            else {
+                                                Err(ErrorResponseKinds::CouldntPerformQuery("To perform that command you must be firstly connected to database from which you'd like to obtain tables".to_string()))
+                                            }
+                                        },
+                                        "table_records" => {
+                                            // User must be connected to specific database prior
+                                            let chckdb = user_conn_t_db();
+                                            if chckdb.0 {
+                                                // Show table (with columns including their names, datatypes and constraint and also table all records)
+                                                let path_str = format!("../source/dbs/{db}/{tb}.json", db = chckdb.1, tb = what_unit.value);
+                                                let path = Path::new(&path_str);
+                                                
+                                                if path.exists() {
+                                                    let table = fs::read_to_string(path).unwrap();
+
+                                                    if table.len() > 0 {
+                                                        Ok(
+                                                            CommandTypes::ShowRes(
+                                                                json!({
+                                                                    "table": table
+                                                                })
+                                                                .to_string()
+                                                            )
+                                                        )
+                                                    }
+                                                    else {
+                                                        Err(ErrorResponseKinds::CouldntPerformQuery("Table is empty file!".to_string()))
+                                                    }
+                                                }
+                                                else {
+                                                    Err(ErrorResponseKinds::CouldntPerformQuery("Entered table name doesn't exists in database to which you're connected".to_string()))
+                                                }
+                                            }
+                                            else {
+                                                Err(ErrorResponseKinds::CouldntPerformQuery("To perform that command you must be firstly connected to database from which you'd like to obtain table data".to_string()))
+                                            }
+                                        },
+                                        "databases" => {
+                                            let path_str = format!("../source/dbs");
+                                            let path = Path::new(&path_str);
+            
+                                            if path.exists() {
+                                                let mut databases_names: Vec<String> = vec![];
+                                                for entry in fs::read_dir(path).unwrap() {
+                                                    let entry = entry.unwrap().path();
+                                                    if entry.is_dir() {
+                                                        databases_names.push(entry.file_name().unwrap().to_str().unwrap().to_string())
+                                                    }
+                                                };
+            
+                                                Ok(
+                                                    CommandTypes::ShowRes(
+                                                        json!({
+                                                            "databases": databases_names
+                                                        })
+                                                        .to_string()
+                                                    )
+                                                )
+                                            }
+                                            else {
+                                                Err(ErrorResponseKinds::UnexpectedReason)
+                                            }
+                                        },
+                                        _ => Err(ErrorResponseKinds::IncorrectRequest)
+                                    }
+                                }
+                                else {
+                                    Err(ErrorResponseKinds::IncorrectRequest)
+                                }
+                            }
+                            else {
+                                Err(ErrorResponseKinds::IncorrectRequest)
+                            }
+                        }
+                        else {
+                            Err(ErrorResponseKinds::GivenSessionDoesntExists)
+                        }
+                    }
+                    else {
+                        Err(ErrorResponseKinds::IncorrectRequest)
+                    }
+                }
+                else {
+                    Err(ErrorResponseKinds::IncorrectRequest)
+                }  
             }
             else {
                 Err(ErrorResponseKinds::IncorrectRequest)
@@ -697,6 +862,9 @@ fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>
         else if message_type == "keep-alive" { // keep user session saved when
             CommandTypes::KeepAlive.parse_cmd(message_body, sessions) // Process message body and return
         }
+        else if message_type == "show" { // display tables list on database or specific table content
+            CommandTypes::Show.parse_cmd(message_body, sessions)
+        }
         else { // when unsuported message was sended
             Err(ErrorResponseKinds::IncorrectRequest)
         }
@@ -735,6 +903,7 @@ pub async fn handle_tcp() {
     });
 
     // Tcp request
+    // TODO: update session time
     for request in listener.incoming() {
         if let Ok(mut stream) = request {
             match handle_request(&mut stream) {
@@ -818,6 +987,11 @@ pub async fn handle_tcp() {
 
                                     // Send success response to client
                                     ResponseTypes::Success(false).handle_response(Some(CommandTypes::Command), Some(stream), Some(&mut *sessions), None)
+                                },
+                                CommandTypes::ShowRes(result) => {
+                                    println!("Show command Result: {}", result);
+
+                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::Show), Some(stream), Some(&mut *sessions), None)
                                 }
                                 _ => () // other types aren't results
                             }
