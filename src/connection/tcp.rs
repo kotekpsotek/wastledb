@@ -40,7 +40,7 @@ impl ResponseTypes {
      * Function to handle TCP server response by write message response bytes to TcpStream represented by "stream" param. In case when response can't be send error message about that will be printed in cli
      * When user would like have encrypted ongoing message it is performed by this function
     **/
-    fn handle_response(&self, from_command: Option<CommandTypes>, stream: Option<TcpStream>, sessions: Option<&mut HashMap<String, String>>, session_id: Option<String>) {
+    fn handle_response(&self, from_command: Option<CommandTypes>, stream: Option<TcpStream>, sessions: Option<&mut HashMap<String, String>>, session_id: Option<String>, response_content: Option<String>) {
         /// When user would like to encrypt message then encrypt or return message in raw format (that fact is inferred from SessionData struct by this function)
         fn response_message_generator(command_type: Option<CommandTypes>, sessions: Option<&mut HashMap<String, String>>, session_id: Option<String>, message: String) -> String {
             if let Some(sess) = sessions {
@@ -137,7 +137,16 @@ impl ResponseTypes {
                     respose_msg_raw
                 }
                 else {
-                    "OK".to_string()
+                    let mut res = format!("OK");
+                    // When response content has been passed to params (as "Some(content_string)") then send response with this content
+                    match response_content {
+                        Some(content) => {
+                            res.push_str(&format!(";{}", content));
+                            ()
+                        },
+                        None => ()
+                    };
+                    res
                 }
             }
         }
@@ -406,124 +415,133 @@ impl CommandTypes {
                 if session_key.is_some() {
                     let session_key = session_key.unwrap();
                     if session_key.name == "session_id" {
-                        if let Some(session) = sessions.unwrap().get(session_key.value) {
-                            // Compute command body
-                            if what_key_val.is_some() && what_unit.is_some() {
-                                let what_key_val = what_key_val.unwrap();
-                                let what_unit = what_unit.unwrap();
+                        if let Some(session_storage) = sessions {
+                            // Extend session live time after call this command (by emulate KeepAlive command manually)
+                            CommandTypes::KeepAlive.parse_cmd(msg_body, Some(session_storage));
 
-                                // Clousure to check whether user is connected to database and that database name
-                                let user_conn_t_db = || {
-                                    let session_dat_des = serde_json::from_str::<SessionData>(&session).unwrap();
-                                    match session_dat_des.connected_to_database {
-                                        Some(db_name) => {
-                                            (true, db_name)
-                                        },
-                                        None => (false, String::new())
-                                    }
-                                };
-
-                                if what_key_val.name == "what" && what_unit.name == "unit_name" {
-                                    match what_key_val.value {
-                                        "database_tables" => {
-                                            // User must be connected to specific database prior
-                                            let chckdb = user_conn_t_db();
-                                            if chckdb.0 {
-                                                // Show all database tables
-                                                let path_str = format!("../source/dbs/{db}", db = chckdb.1);
-                                                let path = Path::new(&path_str);
-                                                
-                                                if path.exists() {
-                                                    let mut table_names = vec![] as Vec<String>; // only correct tables names without .json extension
-                                                    for entry in fs::read_dir(path).unwrap() {
-                                                        let entry = entry.unwrap().path();
-
-                                                        if entry.is_file() {
-                                                            let et_n_s = entry.file_name().unwrap().to_str().unwrap().split(".").collect::<Vec<_>>();
-
-                                                            if et_n_s.len() > 0 && *et_n_s.last().unwrap() == "json" {
-                                                                table_names.push(et_n_s[..(et_n_s.len() - 1)].join(".")) // add table name without .json extension
+                            // Src action
+                            if let Some(session) = session_storage.get(session_key.value) {
+                                // Compute command body
+                                if what_key_val.is_some() && what_unit.is_some() {
+                                    let what_key_val = what_key_val.unwrap();
+                                    let what_unit = what_unit.unwrap();
+    
+                                    // Clousure to check whether user is connected to database and that database name
+                                    let user_conn_t_db = || {
+                                        let session_dat_des = serde_json::from_str::<SessionData>(&session).unwrap();
+                                        match session_dat_des.connected_to_database {
+                                            Some(db_name) => {
+                                                (true, db_name)
+                                            },
+                                            None => (false, String::new())
+                                        }
+                                    };
+    
+                                    if what_key_val.name == "what" && what_unit.name == "unit_name" {
+                                        match what_key_val.value {
+                                            "database_tables" => {
+                                                // User must be connected to specific database prior
+                                                let chckdb = user_conn_t_db();
+                                                if chckdb.0 {
+                                                    // Show all database tables
+                                                    let path_str = format!("../source/dbs/{db}", db = chckdb.1);
+                                                    let path = Path::new(&path_str);
+                                                    
+                                                    if path.exists() {
+                                                        let mut table_names = vec![] as Vec<String>; // only correct tables names without .json extension
+                                                        for entry in fs::read_dir(path).unwrap() {
+                                                            let entry = entry.unwrap().path();
+    
+                                                            if entry.is_file() {
+                                                                let et_n_s = entry.file_name().unwrap().to_str().unwrap().split(".").collect::<Vec<_>>();
+    
+                                                                if et_n_s.len() > 0 && *et_n_s.last().unwrap() == "json" {
+                                                                    table_names.push(et_n_s[..(et_n_s.len() - 1)].join(".")) // add table name without .json extension
+                                                                }
                                                             }
-                                                        }
-                                                    };
-                                                
-                                                    Ok(
-                                                        CommandTypes::ShowRes(
-                                                            json!({
-                                                                "tables": table_names
-                                                            })
-                                                            .to_string()
-                                                        )    
-                                                    )
-                                                }
-                                                else {
-                                                    Err(ErrorResponseKinds::CouldntPerformQuery("Entered database doesn't exists".to_string()))
-                                                }
-                                            }
-                                            else {
-                                                Err(ErrorResponseKinds::CouldntPerformQuery("To perform that command you must be firstly connected to database from which you'd like to obtain tables".to_string()))
-                                            }
-                                        },
-                                        "table_records" => {
-                                            // User must be connected to specific database prior
-                                            let chckdb = user_conn_t_db();
-                                            if chckdb.0 {
-                                                // Show table (with columns including their names, datatypes and constraint and also table all records)
-                                                let path_str = format!("../source/dbs/{db}/{tb}.json", db = chckdb.1, tb = what_unit.value);
-                                                let path = Path::new(&path_str);
-                                                
-                                                if path.exists() {
-                                                    let table = fs::read_to_string(path).unwrap();
-
-                                                    if table.len() > 0 {
+                                                        };
+                                                    
                                                         Ok(
                                                             CommandTypes::ShowRes(
                                                                 json!({
-                                                                    "table": table
+                                                                    "tables": table_names
                                                                 })
                                                                 .to_string()
-                                                            )
+                                                            )    
                                                         )
                                                     }
                                                     else {
-                                                        Err(ErrorResponseKinds::CouldntPerformQuery("Table is empty file!".to_string()))
+                                                        Err(ErrorResponseKinds::CouldntPerformQuery("Entered database doesn't exists".to_string()))
                                                     }
                                                 }
                                                 else {
-                                                    Err(ErrorResponseKinds::CouldntPerformQuery("Entered table name doesn't exists in database to which you're connected".to_string()))
+                                                    Err(ErrorResponseKinds::CouldntPerformQuery("To perform that command you must be firstly connected to database from which you'd like to obtain tables".to_string()))
                                                 }
-                                            }
-                                            else {
-                                                Err(ErrorResponseKinds::CouldntPerformQuery("To perform that command you must be firstly connected to database from which you'd like to obtain table data".to_string()))
-                                            }
-                                        },
-                                        "databases" => {
-                                            let path_str = format!("../source/dbs");
-                                            let path = Path::new(&path_str);
-            
-                                            if path.exists() {
-                                                let mut databases_names: Vec<String> = vec![];
-                                                for entry in fs::read_dir(path).unwrap() {
-                                                    let entry = entry.unwrap().path();
-                                                    if entry.is_dir() {
-                                                        databases_names.push(entry.file_name().unwrap().to_str().unwrap().to_string())
+                                            },
+                                            "table_records" => {
+                                                // User must be connected to specific database prior
+                                                let chckdb = user_conn_t_db();
+                                                if chckdb.0 {
+                                                    // Show table (with columns including their names, datatypes and constraint and also table all records)
+                                                    let path_str = format!("../source/dbs/{db}/{tb}.json", db = chckdb.1, tb = what_unit.value);
+                                                    let path = Path::new(&path_str);
+                                                    
+                                                    if path.exists() {
+                                                        let table = fs::read_to_string(path).unwrap();
+    
+                                                        if table.len() > 0 {
+                                                            Ok(
+                                                                CommandTypes::ShowRes(
+                                                                    json!({
+                                                                        "table": table
+                                                                    })
+                                                                    .to_string()
+                                                                )
+                                                            )
+                                                        }
+                                                        else {
+                                                            Err(ErrorResponseKinds::CouldntPerformQuery("Table is empty file!".to_string()))
+                                                        }
                                                     }
-                                                };
-            
-                                                Ok(
-                                                    CommandTypes::ShowRes(
-                                                        json!({
-                                                            "databases": databases_names
-                                                        })
-                                                        .to_string()
+                                                    else {
+                                                        Err(ErrorResponseKinds::CouldntPerformQuery("Entered table name doesn't exists in database to which you're connected".to_string()))
+                                                    }
+                                                }
+                                                else {
+                                                    Err(ErrorResponseKinds::CouldntPerformQuery("To perform that command you must be firstly connected to database from which you'd like to obtain table data".to_string()))
+                                                }
+                                            },
+                                            "databases" => {
+                                                let path_str = format!("../source/dbs");
+                                                let path = Path::new(&path_str);
+                
+                                                if path.exists() {
+                                                    let mut databases_names: Vec<String> = vec![];
+                                                    for entry in fs::read_dir(path).unwrap() {
+                                                        let entry = entry.unwrap().path();
+                                                        if entry.is_dir() {
+                                                            databases_names.push(entry.file_name().unwrap().to_str().unwrap().to_string())
+                                                        }
+                                                    };
+                
+                                                    Ok(
+                                                        CommandTypes::ShowRes(
+                                                            json!({
+                                                                "databases": databases_names
+                                                            })
+                                                            .to_string()
+                                                        )
                                                     )
-                                                )
-                                            }
-                                            else {
-                                                Err(ErrorResponseKinds::UnexpectedReason)
-                                            }
-                                        },
-                                        _ => Err(ErrorResponseKinds::IncorrectRequest)
+                                                }
+                                                else {
+                                                    Err(ErrorResponseKinds::UnexpectedReason)
+                                                }
+                                            },
+                                            _ => Err(ErrorResponseKinds::IncorrectRequest)
+                                        }
+                                    }
+                                    else {
+                                        Err(ErrorResponseKinds::IncorrectRequest)
                                     }
                                 }
                                 else {
@@ -531,11 +549,11 @@ impl CommandTypes {
                                 }
                             }
                             else {
-                                Err(ErrorResponseKinds::IncorrectRequest)
+                                Err(ErrorResponseKinds::GivenSessionDoesntExists)
                             }
                         }
                         else {
-                            Err(ErrorResponseKinds::GivenSessionDoesntExists)
+                            Err(ErrorResponseKinds::UnexpectedReason)
                         }
                     }
                     else {
@@ -903,7 +921,6 @@ pub async fn handle_tcp() {
     });
 
     // Tcp request
-    // TODO: update session time
     for request in listener.incoming() {
         if let Ok(mut stream) = request {
             match handle_request(&mut stream) {
@@ -955,14 +972,13 @@ pub async fn handle_tcp() {
                                                 // println!("{:?}", sessions); // Test: print all sessions in list after add new session
 
                                                 // Send response
-                                                    // Attach public key to response for bring encryption between client and server. Only attached when "use_rsa" option has been attached to request
-                                                ResponseTypes::Success(true).handle_response(Some(CommandTypes::Register), s, Some(&mut *sessions), Some(uuid_gen))
+                                                ResponseTypes::Success(true).handle_response(Some(CommandTypes::Register), s, Some(&mut *sessions), Some(uuid_gen), None)
                                             },
-                                            _ => ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response( Some(CommandTypes::Register), s, None, None)
+                                            _ => ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response( Some(CommandTypes::Register), s, None, None, None)
                                         };
                                     }
                                     else {
-                                        ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin).handle_response(Some(CommandTypes::Register), s, None, None)
+                                        ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin).handle_response(Some(CommandTypes::Register), s, None, None, None)
                                     }
                                 },
                                 CommandTypes::KeepAliveRes(ses_id, timestamp) => { // command to extend session life (heartbeat system -> so keep-alive)
@@ -979,24 +995,24 @@ pub async fn handle_tcp() {
                                     sessions.insert(ses_id.clone(), json_new_sess_data);
 
                                         // Send response
-                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::KeepAlive), Some(stream), Some(&mut *sessions), Some(ses_id))
+                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::KeepAlive), Some(stream), Some(&mut *sessions), Some(ses_id), None)
                                 },
                                 CommandTypes::CommandRes(query) => {
                                     // Furthermore process query by database
                                     println!("Query: {}", query);
 
                                     // Send success response to client
-                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::Command), Some(stream), Some(&mut *sessions), None)
+                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::Command), Some(stream), Some(&mut *sessions), None, Some(query))
                                 },
                                 CommandTypes::ShowRes(result) => {
                                     println!("Show command Result: {}", result);
 
-                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::Show), Some(stream), Some(&mut *sessions), None)
+                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::Show), Some(stream), Some(&mut *sessions), None, Some(result))
                                 }
                                 _ => () // other types aren't results
                             }
                         },
-                        Err(err_kind) => ResponseTypes::Error(err_kind).handle_response(None, Some(stream), None, None)
+                        Err(err_kind) => ResponseTypes::Error(err_kind).handle_response(None, Some(stream), None, None, None)
                     };
                 }
                 Err(_) => {
@@ -1009,7 +1025,7 @@ pub async fn handle_tcp() {
             }
         }
         else { // while error durning creation of stream handler
-            ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(None, None, None, None)
+            ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response(None, None, None, None, None)
         }
     }
 }
