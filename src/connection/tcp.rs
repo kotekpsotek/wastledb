@@ -202,10 +202,12 @@ enum CommandTypes {
     Command,
     KeepAlive,
     Show,
+    DatabaseConnect, // change database from which user is connected
     RegisterRes(LoginCommandData), // Result of parsing "Register" command recognizer prior as "Register" child
     KeepAliveRes(String, u128), // 1. Is for id of session retrived from msg_body, 2. Is for parse KeepAlive result where "u128" is generated timestamp of parse generation
     CommandRes(String), // 1. SQL query content is attached under
-    ShowRes(String) // Outcome to show into String type
+    ShowRes(String), // Outcome to show into String type
+    DatabaseConnectRes(String, String) // 1. Database name, 2. Session ID
 }
 
 #[derive(Debug)]
@@ -407,9 +409,9 @@ impl CommandTypes {
         else if matches!(self, Self::Show) { // display tables list on database or specific table content
             let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
             if msg_body_sep.len() == 3 { // msg body must include 3 keys in same order as entered here: 1. session_id|x=x|sessionID 2. what|x=x|database_tables/table 3. unit_name|x=x|database_name/table_name
-                let session_key = self.clone().parse_key_value(msg_body_sep[0]);
-                let what_key_val = self.clone().parse_key_value(msg_body_sep[1]);
-                let what_unit = self.clone().parse_key_value(msg_body_sep[2]);
+                let what_key_val = self.clone().parse_key_value(msg_body_sep[0]);
+                let what_unit = self.clone().parse_key_value(msg_body_sep[1]);
+                let session_key = self.clone().parse_key_value(msg_body_sep[2]);
 
                 // Check whether session was attached and prior initialized
                 if session_key.is_some() {
@@ -537,7 +539,9 @@ impl CommandTypes {
                                                     Err(ErrorResponseKinds::UnexpectedReason)
                                                 }
                                             },
-                                            _ => Err(ErrorResponseKinds::IncorrectRequest)
+                                            _ => {
+                                                Err(ErrorResponseKinds::IncorrectRequest)
+                                            }
                                         }
                                     }
                                     else {
@@ -563,6 +567,39 @@ impl CommandTypes {
                 else {
                     Err(ErrorResponseKinds::IncorrectRequest)
                 }  
+            }
+            else {
+                Err(ErrorResponseKinds::IncorrectRequest)
+            }
+        }
+        else if matches!(self, Self::DatabaseConnect) { // connect user with specific database name // user must be singin with database prior
+            let msb_sp = msg_body.split(" 1-1 ").collect::<Vec<_>>();
+            if msb_sp.len() == 2 {
+                let db_name = self.clone().parse_key_value(msb_sp[0]);
+                let session_id = self.clone().parse_key_value(msb_sp[1]);
+                if db_name.is_some() && session_id.is_some() {
+                    let db_name = db_name.unwrap();
+                    let session_id = session_id.unwrap();
+                    // Check de-parsed keys names correcteness
+                    if session_id.name == "session_id" && db_name.name == "database_name" {
+                        // Check whether session exists
+                        if let Some(_) = sessions.as_ref().unwrap().get(session_id.value) {
+                            // Extend session live time after call this command (by emulate KeepAlive command manually)
+                            CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions.unwrap()));
+
+                            Ok(CommandTypes::DatabaseConnectRes(db_name.value.to_string(), session_id.value.to_string()))
+                        }
+                        else {
+                            Err(ErrorResponseKinds::GivenSessionDoesntExists)
+                        }
+                    }
+                    else {
+                        Err(ErrorResponseKinds::IncorrectRequest)
+                    }
+                }
+                else {
+                    Err(ErrorResponseKinds::IncorrectRequest)
+                }
             }
             else {
                 Err(ErrorResponseKinds::IncorrectRequest)
@@ -883,6 +920,9 @@ fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>
         else if message_type == "show" { // display tables list on database or specific table content
             CommandTypes::Show.parse_cmd(message_body, sessions)
         }
+        else if message_type == "databaseconnect" { // connect user with specific database name
+            CommandTypes::DatabaseConnect.parse_cmd(message_body, sessions)
+        }
         else { // when unsuported message was sended
             Err(ErrorResponseKinds::IncorrectRequest)
         }
@@ -1008,7 +1048,30 @@ pub async fn handle_tcp() {
                                     println!("Show command Result: {}", result);
 
                                     ResponseTypes::Success(false).handle_response(Some(CommandTypes::Show), Some(stream), Some(&mut *sessions), None, Some(result))
-                                }
+                                },
+                                CommandTypes::DatabaseConnectRes(database_name, session_id) => {
+                                    let ps = format!("../source/dbs/{}", database_name);
+                                    let path_database = Path::new(&ps);
+
+                                    if path_database.exists() {
+                                        let mut sess_datas = serde_json::from_str::<SessionData>(&sessions.get(&session_id).unwrap()).unwrap();
+                                        
+                                        // Push database name to session
+                                        sess_datas.connected_to_database = Some(database_name);
+                                        
+                                        // Serialize to string updated session data
+                                        let new_sess_content = serde_json::to_string(&sess_datas).unwrap();
+
+                                        // Update session data
+                                        sessions.insert(session_id.to_owned(), new_sess_content).unwrap();
+
+                                        // Send Response
+                                        ResponseTypes::Success(false).handle_response(Some(CommandTypes::DatabaseConnect), Some(stream), Some(&mut *sessions), Some(session_id), None)
+                                    }
+                                    else {
+                                        ResponseTypes::Error(ErrorResponseKinds::CouldntPerformQuery("Entered database doesn't exists".to_string())).handle_response(Some(CommandTypes::DatabaseConnect), Some(stream), Some(&mut *sessions), Some(session_id), None)
+                                    }
+                                },
                                 _ => () // other types aren't results
                             }
                         },
