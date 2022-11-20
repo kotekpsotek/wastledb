@@ -183,23 +183,24 @@ pub mod tests {
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
 
             //... Request 
+        // TODO: Change order: "session_id" must always be last and sql_query value couldn't end with semicolon ";"
             // Remained options (not used in sended query) (with separators): 1-1 connect_auto|x=x|true
                 // ... Operation: INSERT INTO    
-        // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|INSERT INTO "mycat2" VALUES ('kika', 'female', 5);"#, sess_id).as_bytes()).unwrap();
+        // connection.write(f!(r#"Command;sql_query|x=x|INSERT INTO "mycat2" VALUES ('kika', 'female', 5) 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
                 // ... Opeartion: INSERT OVERWRITE TABLE
-        // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|INSERT OVERWRITE TABLE "mycat" VALUES ('cat', 'xx', '1');"#, sess_id).as_bytes()).unwrap();
+        // connection.write(f!(r#"Command;sql_query|x=x|INSERT OVERWRITE TABLE "mycat" VALUES ('cat', 'xx', '1') 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
                 // ... Operation: CREATE TABLE
-        // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|CREATE TABLE mycat2 (name varchar(255) NOT NULL, gender varchar(255) NOT NULL, age int)"#, sess_id).as_bytes()).unwrap();
-                // ... Operation: TRUNCATE
-        // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|TRUNCATE TABLE mycat"#, sess_id).as_bytes()).unwrap();
+        // connection.write(f!(r#"Command;sql_query|x=x|CREATE TABLE mycat2 (name varchar(255) NOT NULL, gender varchar(255) NOT NULL, age int) 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
+        // ... Operation: TRUNCATE
+        // connection.write(f!(r#"Command;sql_query|x=x|TRUNCATE TABLE mycat 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
                 // ... Operation: Drop
-        // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|DROP TABLE mycat"#, sess_id).as_bytes()).unwrap();
+        // connection.write(f!(r#"Command;sql_query|x=x|DROP TABLE mycat 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
                 // ... Operation: SELECT
-        // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|SELECT * FROM mycat2 WHERE age = 5 AND name = kika OR age = 2;"#, sess_id).as_bytes()).unwrap();
+        // connection.write(f!(r#"Command;sql_query|x=x|SELECT * FROM mycat2 WHERE age = 5 AND name = kika OR age = 2 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
                 // ... Operation: DELETE
-        // connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|DELETE FROM mycat2 WHERE age >= 2;"#, sess_id).as_bytes()).unwrap();
+        // connection.write(f!(r#"Command;sql_query|x=x|DELETE FROM mycat2 WHERE age >= 2 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
                 // ... Operation: UPDATE
-        connection.write(f!(r#"Command;session_id|x=x|{} 1-1 sql_query|x=x|UPDATE mycat2 SET name = 'hex', age = 255;"#, sess_id).as_bytes()).unwrap();
+        connection.write(f!(r#"Command;sql_query|x=x|UPDATE mycat2 SET name = 'hex', age = 255 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
             //... Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf2).expect("Couldn't read server response");
@@ -221,11 +222,11 @@ pub mod tests {
 
         // Request
             // Show dbs databases
-        // connection.write(f!(r#"Show;session_id|x=x|{} 1-1 what|x=x|databases 1-1 unit_name|x=x|none"#, sess_id).as_bytes()).unwrap();
+        connection.write(f!(r#"Show;what|x=x|databases 1-1 unit_name|x=x|none 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
             // Show database tables
-        connection.write(f!(r#"Show;what|x=x|database_tables 1-1 unit_name|x=x|none 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
+        // connection.write(f!(r#"Show;what|x=x|database_tables 1-1 unit_name|x=x|none 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
             // Show specific table data
-        // connection.write(f!(r#"Show;session_id|x=x|{} 1-1 what|x=x|table_records 1-1 unit_name|x=x|mycat2"#, sess_id).as_bytes()).unwrap();
+        // connection.write(f!(r#"Show;what|x=x|table_records 1-1 unit_name|x=x|mycat2 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
         
 
         // Response

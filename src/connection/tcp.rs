@@ -330,11 +330,11 @@ impl CommandTypes {
         }
         else if matches!(self, Self::Command) { // command for execute sql query in database
             let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
-            if msg_body_sep.len() >= 2 { // isnide login section must be minimum 2 pieces: 1 - session_id|x=x|session_id 2 - sql_query|x=x|sql query which will be executed on db, 3 - ...described inside block
+            if msg_body_sep.len() >= 2 { // isnide login section must be minimum 2 pieces: 1 - sql_query|x=x|sql query which will be executed on db, 2 - ...described inside block, 3 - session_id|x=x|session_id
                 //... session
                 let request_session = self
                     .clone()
-                    .parse_key_value(msg_body_sep[0]);
+                    .parse_key_value(msg_body_sep.last().unwrap());
 
                 if let Some(CommandTypeKeyDiff { name, value: session_id }) = request_session {
                     let sessions = sessions.unwrap(); 
@@ -342,10 +342,10 @@ impl CommandTypes {
                         //... query
                         let sql_query_key = self
                             .clone()
-                            .parse_key_value(msg_body_sep[1]);
+                            .parse_key_value(msg_body_sep[0]);
                         // Using when user would like connect to database after create database using 'CREATE DATABASE database_name' SQL query // this option always must be 3 in order and value assigned to it must be "boolean"
                         let connect_auto = if msg_body_sep.len() >= 3 { // to pass this option must be presented prior 2 keys so: 1. session_id, 2. command (src)  
-                            if let Some(CommandTypeKeyDiff { name, value }) = self.clone().parse_key_value(msg_body_sep[2]) {
+                            if let Some(CommandTypeKeyDiff { name, value }) = self.clone().parse_key_value(msg_body_sep[1]) {
                                 if name == "connect_auto" && vec!["true", "false"].contains(&value) {
                                     Some(
                                         CommandTypeKeyDiff {
@@ -1034,6 +1034,7 @@ pub async fn handle_tcp() {
                                         //...Update session
                                     sessions.insert(ses_id.clone(), json_new_sess_data);
 
+                                    println!("Session live time has been updated");
                                         // Send response
                                     ResponseTypes::Success(false).handle_response(Some(CommandTypes::KeepAlive), Some(stream), Some(&mut *sessions), Some(ses_id), None)
                                 },
