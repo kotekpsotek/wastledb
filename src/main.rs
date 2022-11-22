@@ -219,7 +219,7 @@ pub mod tests {
                 // ... Operation: UPDATE
         // connection.write(f!(r#"Command;sql_query|x=x|UPDATE mycat2 SET name = 'hex', age = 255 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
         // ... Operation: ALTER TABLE
-        connection.write(f!(r#"Command;sql_query|x=x|ALTER TABLE mycat2 RENAME TO mycat2 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
+        connection.write(f!(r#"Command;sql_query|x=x|ALTER TABLE mycat2 RENAME COLUMN name TO name_test 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
             //... Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf2).expect("Couldn't read server response");

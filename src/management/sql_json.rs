@@ -4,7 +4,7 @@ use std::{fs, path::{Path, PathBuf}, collections::{HashMap, HashSet}, borrow::Bo
 use serde::{self, Deserialize, Serialize};
 use sqlparser::{
     self,
-    ast::{ColumnOption, ColumnOptionDef, DataType, Statement, Expr, Value as SQLParserValue, BinaryOperator, Assignment},
+    ast::{ColumnOption, ColumnOptionDef, DataType, Statement, Expr, Value as SQLParserValue, BinaryOperator, Assignment, AlterTableOperation},
 };
 use Statement::*;
 
@@ -152,7 +152,8 @@ pub enum ProcessSQLSupportedQueries<'x> {
     Truncate(TablePath<'x>),
     Select(TablePath<'x>, ActionOnlyForTheseColumns, Option<Expr>), // path to table, 2. return results for specific record tuples can be all, 3. Select only these records
     Delete(TablePath<'x>, Option<Expr>), // Delete whole table records or only specific record
-    Update(TablePath<'x>, Vec<Assignment>, Option<Expr>) // 1. TablePath, 2. Assigments, 3. Condition/s
+    Update(TablePath<'x>, Vec<Assignment>, Option<Expr>), // 1. TablePath, 2. Assigments, 3. Condition/s
+    AlterTable(TablePath<'x>, AlterTableOperation)
 }
 
 #[derive(Debug, Clone)]
@@ -1333,6 +1334,51 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
             }
             else {
                 Ok(json_t_data)
+            }
+        },
+        AlterTable(table_path, operation) => {
+            // Before that procedure is call has been successfull checked that table under given path exists so this shouldn't be performed again
+            match operation {
+                AlterTableOperation::RenameColumn { old_column_name, new_column_name } => {
+                    let new_column_name = new_column_name.value;
+                    let old_column_name = old_column_name.value;
+
+                    let table_data = fs::read_to_string(table_path).unwrap();
+                    let mut json_t_data = serde_json::from_str::<JsonSQLTable>(&table_data).unwrap();
+                    
+                    // Check column with "old_column_name" exists
+                    let exists_column_check = json_t_data.columns.iter().enumerate().find(|column_data| {
+                        if column_data.1.name == old_column_name {
+                            return true
+                        };
+
+                        false
+                    });
+
+                    // Perform action and return result
+                    if let Some((id, column_d)) = exists_column_check {
+                        // Change column name
+                        json_t_data.columns[id].name = new_column_name.clone();
+
+                        // Change column name for each row (perform only when table has got saved rows) FIXME: Remove when rows will be assigned to columns using column id
+                        if let Some(ref mut rows) = json_t_data.rows {
+                            rows.iter_mut().for_each(|ref mut row| {
+                                row.iter_mut().for_each(|cell| {
+                                    if cell.col == old_column_name {
+                                        cell.col = new_column_name.clone();
+                                    };
+                                });
+                            });
+                        }
+
+                        // Return result
+                        Ok(json_t_data)
+                    }
+                    else {
+                        Err(())
+                    }
+                },
+                _ => Err(()) // for unsupported operations
             }
         }
     }

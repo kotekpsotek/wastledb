@@ -622,7 +622,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                             let table_path = get_dbtable_path(&db, ex_table_name);
 
                             if table_path.exists() {
-                                // Operation that depends on file system will be performed here but those operating on json will be performed by sql_json.rs function
+                                // Operation that depends on file system will be performed here but those operating on json will be performed by sql_json.rs function but save if success will be performed here as in others ops
                                 match operation {
                                     AlterTableOperation::RenameTable { table_name } => {
                                         let ren_table_name = table_name.0[0].value.borrow() as &String;
@@ -647,7 +647,22 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                                             break Error("Table name to that you would like update table already exists in that database".to_string());
                                         }
                                     },
-                                    _ => ()
+                                    _ => {
+                                        // Process (save, return adequate response to op result)
+                                        let sql = process_sql(ProcessSQLSupportedQueries::AlterTable(&table_path, operation));
+                                        match sql {
+                                            Ok(modified_table) => {
+                                                // Save result to same table file
+                                                if fs::write(table_path, serde_json::to_string(&modified_table).expect("Couldn't convert table to json format")).is_ok() {
+                                                    break Success(None);
+                                                };
+                                                
+                                                // When above operation couldn't been perf. return explicity Error
+                                                break Error(f!("Couldn't save result of performed operation"));
+                                            },
+                                            Err(_) => break Error("Couldn't perform operation. Maybe operation isn't supported".to_string()) // a.o: For unsuppoted AlterTable operations via "process_sql(_)" function 
+                                        }
+                                    }
                                 }
                             }
                             else {
