@@ -1,9 +1,9 @@
-use sqlparser::{ dialect::AnsiDialect, parser::Parser as SqlParser, ast::{Statement, ObjectName, SetExpr, Expr, DataType, ColumnOptionDef, ObjectType, SelectItem, TableFactor} };
+use sqlparser::{ dialect::AnsiDialect, parser::Parser as SqlParser, ast::{Statement, ObjectName, SetExpr, Expr, DataType, ColumnOptionDef, ObjectType, SelectItem, TableFactor, AlterTableOperation} };
 #[allow(unused)]
 use datafusion::prelude::*;
 use format as f;
 use Outcomes::*;
-use std::{ fs, path::Path, collections::HashMap };
+use std::{ fs, path::Path, collections::HashMap, fmt::format, borrow::Borrow };
 
 use crate::connection::tcp::{ CommandTypeKeyDiff, SessionData };
 use crate::management::sql_json::{ self, process_sql, ProcessSQLRowField as Field, SupportedSQLDataTypes, SupportedSQLColumnConstraints, ProcessSQLSupportedQueries, InsertOperations, ConvertSQLParserTypesToSupported, ConvertSQLParserOptionsToSupportedConstraints };
@@ -46,7 +46,7 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
 
     match parse_operation {
         Ok(parse_op_result) => {
-            // println!("{:?}", parse_op_result);
+            println!("{:?}", parse_op_result);
             // Process SQL Query and do amazing things
             let mut it = 0;
             loop {
@@ -605,6 +605,49 @@ pub fn process_query(query: &str, auto_connect: Option<crate::connection::tcp::C
                                         }
                                     },
                                     Err(_) => break Error(f!("SQL query couldn't been performed"))
+                                }
+                            }
+                            else {
+                                break Error(f!("Table given by you doesn't exists in database to which you're connected"));
+                            }
+                        }
+                        else {
+                            break Error(f!("You're not connected to database"));
+                        }
+                    },
+                    Statement::AlterTable { name, operation } => {
+                        // User must be prior connected to specific database
+                        if let Some(db) = get_database_user_connected_to(sessions, &session_id) {
+                            let ex_table_name = &name.0[0].value; // Existsing table name (on that operation is performing)
+                            let table_path = get_dbtable_path(&db, ex_table_name);
+
+                            if table_path.exists() {
+                                // Operation that depends on file system will be performed here but those operating on json will be performed by sql_json.rs function
+                                match operation {
+                                    AlterTableOperation::RenameTable { table_name } => {
+                                        let ren_table_name = table_name.0[0].value.borrow() as &String;
+                                        let ren_table_path = get_dbtable_path(&db, ren_table_name);
+                                        
+                                        // To setup specific name for table in database must doesn't exists that table name thus also table name can't be changed to same name
+                                        if !ren_table_path.exists() {
+                                            // Determine path to file
+                                            let tb_path = table_path.clone();
+                                            let tb_path = tb_path.parent().expect("Couldn't get table directory");
+                                            let tb_path = tb_path.as_os_str().to_str().expect("Couldn't convert table path to string");
+                                        
+
+                                            // Rename table
+                                            break fs::rename(table_path, format!("{pth}/{tb}.json", tb = table_name, pth = tb_path))
+                                                .map_or_else(
+                                                    |_| Error(f!("Couldn't rename table")),
+                                                    |_| Success(None)
+                                                );
+                                        }
+                                        else {
+                                            break Error("Table name to that you would like update table already exists in that database".to_string());
+                                        }
+                                    },
+                                    _ => ()
                                 }
                             }
                             else {

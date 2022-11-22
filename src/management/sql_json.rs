@@ -111,7 +111,9 @@ pub struct JsonSQLTableColumn {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 /// Represent each row with data for "JsonSQLTable" struct
 pub struct JsonSQLTableColumnRow {
+    /// To which column this row belongs to
     pub col: String,
+    /// Row value
     pub value: Option<String>,
 }
 

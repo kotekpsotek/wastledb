@@ -92,6 +92,8 @@ pub mod tests {
     use super::inter::MAXIMUM_RESPONSE_SIZE_BYTES;
 
     use rsa::{self,  pkcs1::{self, DecodeRsaPublicKey, DecodeRsaPrivateKey} };
+    use datafusion::prelude::*;
+    use tokio;
 
     pub fn register_user_by_tcp() -> String {
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
@@ -108,6 +110,21 @@ pub mod tests {
         
         // Return response
         resp_str
+    }
+
+    #[tokio::test]
+    // If you'd like to know why datadussion isn't good choise run this test
+    async fn data_fussion_test() {
+        let cx = SessionContext::new();
+        
+        // Register table to execute the query
+        let json = cx.register_json("example", "../source/dbs/dogo/mycat2.json", NdJsonReadOptions::default()).await.unwrap();
+
+        // Execute query
+        let qr = cx.sql("SELECT * FROM example").await.unwrap();
+
+        // Show query result/s
+        qr.show().await.unwrap();
     }
 
     /// Convert message body to ready to use passages
@@ -200,7 +217,9 @@ pub mod tests {
                 // ... Operation: DELETE
         // connection.write(f!(r#"Command;sql_query|x=x|DELETE FROM mycat2 WHERE age >= 2 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
                 // ... Operation: UPDATE
-        connection.write(f!(r#"Command;sql_query|x=x|UPDATE mycat2 SET name = 'hex', age = 255 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
+        // connection.write(f!(r#"Command;sql_query|x=x|UPDATE mycat2 SET name = 'hex', age = 255 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
+        // ... Operation: ALTER TABLE
+        connection.write(f!(r#"Command;sql_query|x=x|ALTER TABLE mycat2 RENAME TO mycat2 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
             //... Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf2).expect("Couldn't read server response");
