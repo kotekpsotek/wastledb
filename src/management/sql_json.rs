@@ -1,5 +1,6 @@
 #![allow(unused)]
 use std::{fs, path::{Path, PathBuf}, collections::{HashMap, HashSet}, borrow::BorrowMut};
+use sqlparser::{ ast::DataType };
 
 use serde::{self, Deserialize, Serialize};
 use sqlparser::{
@@ -1337,26 +1338,29 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
             }
         },
         AlterTable(table_path, operation) => {
+            // Checke whether table has got column under specific name
+            fn exists_column_check(table: &JsonSQLTable, eq_name: String) -> Option<(usize, &JsonSQLTableColumn)> {
+                table.columns.iter().enumerate().find(|column_data| {
+                    if column_data.1.name == eq_name {
+                        return true
+                    };
+
+                    false
+                })
+            }
+            
             // Before that procedure is call has been successfull checked that table under given path exists so this shouldn't be performed again
             match operation {
                 AlterTableOperation::RenameColumn { old_column_name, new_column_name } => {
                     let new_column_name = new_column_name.value;
                     let old_column_name = old_column_name.value;
 
+                    // Get and Parse table content 
                     let table_data = fs::read_to_string(table_path).unwrap();
                     let mut json_t_data = serde_json::from_str::<JsonSQLTable>(&table_data).unwrap();
-                    
-                    // Check column with "old_column_name" exists
-                    let exists_column_check = json_t_data.columns.iter().enumerate().find(|column_data| {
-                        if column_data.1.name == old_column_name {
-                            return true
-                        };
 
-                        false
-                    });
-
-                    // Perform action and return result
-                    if let Some((id, column_d)) = exists_column_check {
+                    // Check column with "old_column_name" exists and Perform action and return result
+                    if let Some((id, column_d)) = exists_column_check(&json_t_data, old_column_name) {
                         // Change column name
                         json_t_data.columns[id].name = new_column_name.clone();
 
@@ -1375,6 +1379,36 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                         Ok(json_t_data)
                     }
                     else {
+                        Err(())
+                    }
+                },
+                AlterTableOperation::AddColumn { column_def: adding_column } => {
+                    if let Some(d_type) = DataType::convert(&adding_column.data_type) {
+                        // Get and Parse table content 
+                        let table_data = fs::read_to_string(table_path).unwrap();
+                        let mut json_t_data = serde_json::from_str::<JsonSQLTable>(&table_data).unwrap();
+                        
+                        // Perform further only when column with same name doesn't exists
+                        if exists_column_check(&json_t_data, adding_column.name.value).is_none() {
+                            // create new column
+                            let new_column = JsonSQLTableColumn {
+                                name: adding_column.name.value,
+                                d_type,
+                                constraints: None // Constraint isn't adding using ALTER TABLE .. ADD COLUMN .. but using query ALTER TABLE .. ADD CONSTRAINT
+                            };
+
+                            // Add created column to table columns batch
+                            json_t_data.columns.push(new_column);
+
+                            // Branchback result
+                            return Ok(json_t_data)
+                        };
+
+                        // When something couldn't be performed ahead
+                        Err(())
+                    }
+                    else {
+                        // Data type isn't supported
                         Err(())
                     }
                 },
