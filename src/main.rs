@@ -219,7 +219,9 @@ pub mod tests {
                 // ... Operation: UPDATE
         // connection.write(f!(r#"Command;sql_query|x=x|UPDATE mycat2 SET name = 'hex', age = 255 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
         // ... Operation: ALTER TABLE // TODO: More spohisticated test for query 'ALTER TABLE .. CHANGE COLUMN ..'
-        connection.write(f!(r#"Command;sql_query|x=x|ALTER TABLE mycat2 CHANGE COLUMN name_test name varchar(255) 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
+        // connection.write(f!(r#"Command;sql_query|x=x|ALTER TABLE mycat2 CHANGE COLUMN name_test name varchar(2555) 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
+            // Command ALTER TABLE couldn't be parsed by sqlparser (always SQL Syntax Error)
+        connection.write(f!("Command;sql_query|x=x|ALTER TABLE t2 ALTER COLUMN c varchar(355) 1-1 session_id|x=x|{}", sess_id).as_bytes()).unwrap();
             //... Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf2).expect("Couldn't read server response");

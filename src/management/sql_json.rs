@@ -4,7 +4,7 @@ use std::{fs, path::{Path, PathBuf}, collections::{HashMap, HashSet}, borrow::{B
 use serde::{self, Deserialize, Serialize};
 use sqlparser::{
     self,
-    ast::{ColumnOption, ColumnOptionDef, DataType, Statement, Expr, Value as SQLParserValue, BinaryOperator, Assignment, AlterTableOperation},
+    ast::{ColumnOption, ColumnOptionDef, DataType, Statement, Expr, Value as SQLParserValue, BinaryOperator, Assignment, AlterTableOperation, AlterColumnOperation},
 };
 use Statement::*;
 
@@ -50,6 +50,7 @@ pub enum SupportedSQLDataTypes {
 
 /// Convert from "SupportedSQLDataTypes" to "sqlparser::ast::DataType"
 pub trait ConvertFromSupportedDataTypeToSqlParserDataType {
+    /// Convert from "SupportedSQLDataTypes" to "sqlparser::ast::DataType" 
     fn convert_to(supported_data_type: &SupportedSQLDataTypes) -> Option<DataType> {
         use SupportedSQLDataTypes::*;
         match supported_data_type {
@@ -80,6 +81,7 @@ impl ConvertFromSupportedDataTypeToSqlParserDataType for DataType {}
 
 /// Trait to easy and seamlessly convertion between SQLParser Types stored benath "DataTypes" enum and supported types by database
 pub trait ConvertSQLParserTypesToSupported {
+    /// Convert from "sqlparser::ast::DataType" to "self::SupportedSQLDataTypes"
     fn convert(parser_type: &DataType) -> Option<SupportedSQLDataTypes> {
         use DataType::*;
         // TODO: Add support for more types
@@ -104,9 +106,9 @@ pub trait ConvertSQLParserTypesToSupported {
     }
 
     /// Check whether type under "from" can be converted to type under "to"
-    fn check_type_innterop(to: DataType, from: DataType) -> Result<(), ()> {
+    fn check_type_innterop(to: DataType, from: DataType, cell_value: Option<&String>) -> Result<(), ()> {
         if to == from {
-            // For check convertion in same type and setup same type properties
+            // For check convertion in same type and setted up same type properties
             Ok(())
         }
         else {
@@ -133,12 +135,24 @@ pub trait ConvertSQLParserTypesToSupported {
                                 Err(())
                             }
                         },
-                        _ => Err(())
+                        DataType::Int(_) | DataType::Float(_) | DataType::Boolean => Ok(()),
+                        _ => {
+                            // Check supercases when cell value has been attached and cell value fullfils rules convertion to "to"
+                            if let Some(cell_value) = cell_value {
+                                // Allow to go further when convertion is performed from type "Text" to "Varchar" and cell value is smaller or equal to maximum string length for Varchar type so smaller or equal to 65_553 bytes
+                                if matches!(from, DataType::Text) && cell_value.len() <= u16::MAX as usize {
+                                    return Ok(());
+                                }
+                            };
+
+
+                            Err(())
+                        }
                     }
                 },
                 DataType::Text => {
                     match from {
-                        DataType::Text | DataType::Int(_) | DataType::Float(_) | DataType::Varchar(_) => Ok(()),
+                        DataType::Text | DataType::Int(_) | DataType::Float(_) | DataType::Varchar(_) | DataType::Boolean => Ok(()),
                         _ => Err(())
                     }
                 },
@@ -185,7 +199,9 @@ pub struct JsonSQLTableColumn {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 /// Represent each row with data for "JsonSQLTable" struct
 pub struct JsonSQLTableColumnRow {
-    /// To which column this row belongs to
+    /// To which column name (unique id) this row belongs to.
+    /// Name is unuiqe id of column because only one column with same name can exists in whole table.
+    /// When column name was changes the "col" value for each old name should be changed to new name 
     pub col: String,
     /// Row value
     pub value: Option<String>,
@@ -1411,7 +1427,7 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
             }
         },
         AlterTable(table_path, operation) => {
-            // Checke whether table has got column under specific name
+            /// Checke whether table has got column under specific name. Return found column id on list and these column data
             fn exists_column_check<'x>(table: &'x JsonSQLTable, eq_name: &String) -> Option<(usize, &'x JsonSQLTableColumn)> {
                 table.columns.iter().enumerate().find(|column_data| {
                     if column_data.1.name == *eq_name {
@@ -1422,6 +1438,58 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                 })
             }
             
+            /// Check whether new column type is compatible with old type
+            fn check_new_column_type_compatible_with_old_ctype(json_t_data: &JsonSQLTable, changing_column_name: &String, new_data_type: &DataType) -> bool {
+                let mut whether_perform_further = true;
+                
+                if let Some(rows) = &json_t_data.rows {
+                    for row in rows {
+                        let mut stop_row_iteration = false;
+                        if !whether_perform_further {
+                            break;
+                        };
+                        
+                        // Yes I know that after first match we can break loop and return true outside but "What when old type is TEXT and new Varchar(255)?" -> in that case we must check whether all rows values len for column has got smaller length then 256
+                        for cell in row {
+                            // Perform only for rows assigned to changing column
+                            if cell.col == *changing_column_name {
+                                let cell_column_type = json_t_data.get_column_type(&cell.col).unwrap(); // column must here exists
+                                let cell_column_type_conv = DataType::convert_to(&cell_column_type.clone()); // convert from supported data type to "sqlparser" datatype
+
+                                // Go ahead only when convertion has been successfull passed
+                                if let Some(cell_sqlparser_datatype) = &cell_column_type_conv {
+                                    // Go ahead only when cell type can be converted to specific datatype otherwise stop columns about change Err(())
+                                    if let Err(_) = DataType::check_type_innterop(new_data_type.clone(), cell_sqlparser_datatype.clone(), cell.value.as_ref()) {
+                                        whether_perform_further = false;
+                                        break;
+                                    }
+                                    else {
+                                        // More convinient to understand how it works
+
+                                        // Stop iterations. When new column type and old data type aren't that which must have checked every row value for column to swear correcteness
+                                        if !matches!(cell_column_type_conv, Some(DataType::Text)) && !matches!(new_data_type, DataType::Varchar(_)) { // Varchar can be simple converted to Text but in inrevert (from "Varchar" to "Text") all table values must swear correcteness to Varchar type 
+                                            stop_row_iteration = true;
+                                            break;
+                                        }
+                                    };
+                                }
+                                else {
+                                    whether_perform_further = false;
+                                    break;
+                                };
+                            }
+                        };
+
+                        // Stop row itheration in other cases
+                        if stop_row_iteration {
+                            break;
+                        }
+                    };
+                };
+
+                whether_perform_further
+            }
+
             // Before that procedure is call has been successfull checked that table under given path exists so this shouldn't be performed again
             match operation {
                 AlterTableOperation::RenameColumn { old_column_name, new_column_name } => {
@@ -1437,7 +1505,9 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                         // Change column name
                         json_t_data.columns[id].name = new_column_name.clone();
 
-                        // Change column name for each row (perform only when table has got saved rows) FIXME: Remove when rows will be assigned to columns using column id
+                        // According to using "unique id" for each column (accoridng to previous commit "FIXME" located below (orginally)). It shouldn't be attached for each column beacause already names are unique column identificators. Beside that ALTER operation is performed less often then others so using "id" without "column name" would cause additional overhead (operation geting column name by search column with approptiate id) for operations that are performing often then ALTER like UPDATE (oposite approach to that using now will degrate popularly using Queries performance for that using less often)
+                        // Also using column name is more comfortable when you look how sqlparser returns SQL operations tokens (match column name is just faster and more elegant in that case) (when i write this use case keynote)
+                        // Change column name for each row (perform only when table has got saved rows)
                         if let Some(ref mut rows) = json_t_data.rows {
                             rows.iter_mut().for_each(|ref mut row| {
                                 row.iter_mut().for_each(|cell| {
@@ -1449,11 +1519,10 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                         }
 
                         // Return result
-                        Ok(json_t_data)
-                    }
-                    else {
-                        Err(())
-                    }
+                        return Ok(json_t_data)
+                    };
+                        
+                    Err(())
                 },
                 AlterTableOperation::AddColumn { column_def: adding_column } => {
                     if let Some(d_type) = DataType::convert(&adding_column.data_type) {
@@ -1476,14 +1545,10 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                             // Branchback result
                             return Ok(json_t_data)
                         };
-
-                        // When something couldn't be performed ahead
-                        Err(())
-                    }
-                    else {
-                        // Data type isn't supported
-                        Err(())
-                    }
+                    };
+                        
+                    // Data type isn't supported
+                    Err(())
                 },
                 AlterTableOperation::DropColumn { column_name, if_exists, cascade } => {
                     let column_name = column_name.value;
@@ -1513,13 +1578,14 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                         };
 
                         // Branch back result
-                        Ok(json_t_data)
+                        return Ok(json_t_data)
                     }
-                    else {
-                        Err(())
-                    }
+                    
+                    Err(())
                 },
                 AlterTableOperation::ChangeColumn { old_name, new_name, data_type, options: _ } => {
+                    // Change column name, data type and metadata for rows assigned to modified column
+                    // Operation can be perfromed only when new column datatype is compatible with existing rows for changed columns datatype
                     let old_name = old_name.value;
                     let new_name = new_name.value;
 
@@ -1528,42 +1594,9 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                     let mut json_t_data = serde_json::from_str::<JsonSQLTable>(&table_data).unwrap();
 
                     if exists_column_check(&json_t_data, &old_name).is_some() && exists_column_check(&json_t_data, &new_name).is_none() {
-                        if let Some(d_type) = DataType::convert(&data_type) {
-                            // Determine whether operation can be performed further
-                            let mut go_further = true;
-
-                            // Check whether new datatype for column is compatible with each row cell data
-                            if let Some(rows) = &json_t_data.rows {
-                                for row in rows {
-                                    if !go_further {
-                                        break;
-                                    };
-                                    
-                                    for cell in row {
-                                        // Perform only for changing column cells
-                                        if cell.col == old_name {
-                                            let cell_column_type = json_t_data.get_column_type(&cell.col).unwrap(); // column must here exists
-                                            let cell_column_type_conv = DataType::convert_to(&cell_column_type.clone()); // convert from supported data type to "sqlparser" datatype
-    
-                                            // Go ahead only when convertion has been successfull passed
-                                            if let Some(cell_sqlparser_datatype) = cell_column_type_conv {
-                                                // Go ahead only when cell type can be converted to specific datatype otherwise stop columns about change Err(())
-                                                if let Err(_) = DataType::check_type_innterop(data_type.clone(), cell_sqlparser_datatype.clone()) {
-                                                    go_further = false;
-                                                    break;
-                                                }
-                                            }
-                                            else {
-                                                go_further = false;
-                                                break;
-                                            };
-                                        }
-                                    };
-                                };
-                            };
-                            
-                            // Go further only when already existsing column datas can be changing to another datatype
-                            if go_further {
+                        if let Some(d_type) = DataType::convert(&data_type) {     
+                            // Go further only when already existsing column row datas can be changing to another datatype
+                            if check_new_column_type_compatible_with_old_ctype(&json_t_data, &old_name, &data_type) {
                                 // Change column
                                 for column in &mut json_t_data.columns {
                                     if column.name == old_name {
@@ -1580,12 +1613,55 @@ pub fn process_sql(sql_action: ProcessSQLSupportedQueries) -> Result<JsonSQLTabl
                                     }
                                 };
 
+                                // Change for each row cell in column name to that is assigned row cell value
+                                if let Some(rows) = &mut json_t_data.rows {
+                                    for row in rows {
+                                        for cell in row {
+                                            // Perform only for changing column cells
+                                            if cell.col == old_name {
+                                                cell.col = new_name.clone()
+                                            }
+                                        }
+                                    }
+                                }
+
                                 // Return success
                                 return Ok(json_t_data);
                             }
                         }
                     }
 
+                    Err(())
+                },
+                AlterTableOperation::AlterColumn { column_name, op } => {
+                    // Change column datatype if it is possible
+                    let column_name = column_name.value;
+
+                    // Get and Parse table content 
+                    let table_data = fs::read_to_string(table_path).unwrap();
+                    let mut json_t_data = serde_json::from_str::<JsonSQLTable>(&table_data).unwrap();
+
+                    // Perform branchback "Ok()" only for successfull operations
+                    if let Some((col_list_id, column_data)) = exists_column_check(&json_t_data, &column_name) {
+                        match op {
+                            AlterColumnOperation::SetDataType { data_type, using } => {
+                                // Check whether all rows values can be converted to new datatype
+                                if check_new_column_type_compatible_with_old_ctype(&json_t_data, &column_name, &data_type) {
+                                    // Change type
+                                    json_t_data.columns[col_list_id] = JsonSQLTableColumn {
+                                        d_type: DataType::convert(&data_type).expect("Miss in type system"), // when error that means "convert" assign function doesn't implement something what is implemented in "DataType::check_type_innterop" function/s
+                                        ..column_data.clone()
+                                    };
+
+                                    // Return changed column
+                                    return Ok(json_t_data)
+                                }
+                            },
+                            _ => ()
+                        }
+                    };
+
+                    // Ret... when above action couldn't be performed
                     Err(())
                 },
                 _ => Err(()) // for unsupported operations
