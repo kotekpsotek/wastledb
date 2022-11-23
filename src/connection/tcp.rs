@@ -13,7 +13,8 @@ use {
     std::time::SystemTime,
     std::path::Path,
     std::sync::{Arc, Mutex},
-    std::fs::{self, DirEntry}
+    std::fs::{self, DirEntry},
+    std::str
 };
 use datafusion::parquet::data_type::AsBytes;
 use generic_array::{ typenum::{ UInt, UTerm, B1, B0 }, GenericArray};
@@ -853,6 +854,48 @@ impl CommmunicationEncryption {
         // When not error catched above then return decrypted message as Vaalid UTF-8 characters
         Ok(decrypted_mess)
     }
+}
+
+/// Code and decode connection. From HEX to string UTF-8
+/// Decoded String to be properly decoded must has got 2 characters
+/// Situation that some charcater after encode/decode has got/should has got more then 2 characters is probable
+struct ConnectionCodec;
+impl ConnectionCodec {
+    // Code message to hex format
+    fn code_hex(message: String) -> String {
+        let message = message.as_bytes();
+        let mut hexes = vec![] as Vec<String>;
+        
+        for byte in message {
+            hexes.push(format!("{:X}", byte)) // each hex code has got this form: 1F (each letter has got minimum number of characters in hex so 2) (For most case code builded from 2 characters is sufficient)
+        }
+
+        hexes.join("")
+    }
+
+    /// Decode message from hex format to utf-8
+    fn decode_hex(message: String) -> String {
+        let splitted = message.as_bytes().chunks(2).map(str::from_utf8).collect::<Result<Vec<&str>, _>>().expect("Couldn't create HEX chunks");
+        let mut decoded_bytes = Vec::new() as Vec<u8>;
+
+        // Iterate over each character presented under HEX code in 2 charcters i.e: 2F (UTF-8 character is: \)
+        for splitted_char in splitted {
+            let byte_utf8 = u8::from_str_radix(splitted_char, 16).expect("Couldn't decode hex string fragment to utf-8 byte");
+            decoded_bytes.push(byte_utf8);
+        }
+
+        // Return utf-8 string created from HEX by that whole callable unit
+        String::from_utf8(decoded_bytes).expect("Couldn't convert byte to valid utf-8 string")
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn code_decode_hex() {
+    let message_for_op = format!("hello worldi");
+    let coded = ConnectionCodec::code_hex(message_for_op);
+    let decoded = ConnectionCodec::decode_hex(coded.clone());
+    println!("Coded HEX message: {cod}\nDecoded message from HEX, valid UTF-8: {dec}", cod = coded, dec = decoded)
 }
 
 // Callculate timestamp (how much milliseconds flow from 1 January 1970 to function invoke time)
