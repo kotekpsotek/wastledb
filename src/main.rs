@@ -94,26 +94,29 @@ pub mod tests {
     use rsa::{self,  pkcs1::{self, DecodeRsaPublicKey, DecodeRsaPrivateKey} };
     use datafusion::prelude::*;
     use tokio;
+    use super::connection::tcp::ConnectionCodec;
 
     pub fn register_user_by_tcp() -> String {
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
         
         // Request
             // When rsa option is picked (rsa|x=x|true ["|x=x|" is key->value separator]) then publick key wil be recived in response as last option
-        connection.write("Register;login|x=x|tester 1-1 password|x=x|123456789 1-1 connect_auto|x=x|dogo".as_bytes()).unwrap();
+        let as_hex = ConnectionCodec::code_hex("Register;login|x=x|tester 1-1 password|x=x|123456789 1-1 connect_auto|x=x|dogo".to_string());
+        connection.write(as_hex.as_bytes()).unwrap();
 
         // Response
         let mut buf = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf).expect("Couldn't read server response");
 
-        let resp_str = String::from_utf8(buf.to_vec()).unwrap();
+        let resp_str = String::from_utf8(buf.to_vec()).expect("Coulnd't create utf-8 string with HEX codes string").replace("\0", ""); // + replace null character for elminate error durning decoding code to utf-8 cuz: in HEX letters range (0-F) control character \0 is absent
+        let from_hex = ConnectionCodec::decode_hex(resp_str).expect("Couldn't decode response from HEX");
         
-        // Return response
-        resp_str
+        // // Return response
+        from_hex
     }
 
     #[tokio::test]
-    // If you'd like to know why datadussion isn't good choise run this test
+    // If you'd like to know why datadussion isn't good choisefor this case run this test
     async fn data_fussion_test() {
         let cx = SessionContext::new();
         

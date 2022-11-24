@@ -8,34 +8,33 @@ mod management {
 
 use {
     std::net::{ TcpStream, TcpListener },
-    std::io::{ BufReader, BufRead },
     std::collections::HashMap,
     std::time::SystemTime,
     std::path::Path,
     std::sync::{Arc, Mutex},
-    std::fs::{self, DirEntry},
+    std::fs,
     std::str
 };
-use datafusion::parquet::data_type::AsBytes;
 use generic_array::{ typenum::{ UInt, UTerm, B1, B0 }, GenericArray};
 use login_system::authenticate_user;
-use uuid::{Uuid, timestamp};
+use uuid::Uuid;
 use tokio;
 use crate::inter;
 use serde_json::json; // json macro to create JSON object
 use management::main::Outcomes::*;             
-use rsa::{self, RsaPrivateKey, RsaPublicKey, pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, DecodeRsaPrivateKey, DecodeRsaPublicKey}, PublicKeyParts, PublicKey, PaddingScheme};
-use rand::{self, Rng};
+use rsa::{self, RsaPrivateKey, RsaPublicKey, pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, DecodeRsaPrivateKey, DecodeRsaPublicKey}, PublicKey, PaddingScheme};
+use rand;
 use aes_gcm::{
     Aes256Gcm, Nonce, aead::{Aead, KeyInit, OsRng}
 };
 
-// 
+// List of DBS response types
 enum ResponseTypes {
     Success(bool), // 1. whether attach to success response message user sess id
     Error(ErrorResponseKinds)
 }
 
+// Handle response in staright forward way
 impl ResponseTypes {
     /** 
      * Function to handle TCP server response by write message response bytes to TcpStream represented by "stream" param. In case when response can't be send error message about that will be printed in cli
@@ -159,21 +158,19 @@ impl ResponseTypes {
         };
         match stream {
             Some(mut stri) => {
-                    // Encrypt response message when user would like to have it or send plaintext reponse for example when from some reason couldn't encrypt message
+                // Outcome Encrypted response message when user would like to have it or reponse in plaintext for example when from some reason couldn't encrypt message or user woudn't like to have encrypted connection
                 let ready_result_message_raw = response_message_generator(from_command, sessions, session_id, result_message);
-                    // Send to user encrypted response payload when all Option<_> arguments are enclosed in Some() variant and everything other is good (private and public keys are present, private key are in correct pkcs#1_pem format), [all RSA keys are stored in session data as pem strings]
-                    // Try send to user response
-                let resp = stri.write(ready_result_message_raw.as_bytes());
+                // Convert response message to string with not sepparated hex codes
+                let response_in_hex = ConnectionCodec::code_hex(ready_result_message_raw);
+                // Send response when it is possible as hex codes under which can be ciphertext or plaintext depends on what user would like to have
+                let resp = stri.write(response_in_hex.as_bytes());
+                // Put appropriate action when response couldn't been send (prepared to send cuz RAII)
                 if let Err(_) = resp { // time when to user can't be send response because error is initialized durning creation of http server
                     couldnt_send_response();
                 }
-                // else {
-                //     println!("Response sended, {}", result_message)
-                // }
             },
             None => { // time when to user can't be send response because error is initialized durning creation of http server
                 couldnt_send_response();
-                // println!("b")
             }
         }
     }
@@ -198,6 +195,7 @@ struct LoginCommandData { // setup connection data
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// Supported commnad types and command datas
 enum CommandTypes {
     Register,
     Command,
@@ -210,13 +208,7 @@ enum CommandTypes {
     ShowRes(String), // Outcome to show into String type
     DatabaseConnectRes(String, String) // 1. Database name, 2. Session ID
 }
-
-#[derive(Debug)]
-pub struct CommandTypeKeyDiff<'s> { 
-    name: &'s str,
-    value: &'s str
-}
-
+// Distinguish command and return deserialized data from it
 impl CommandTypes {
     // Parse datas from recived request command
     // Return command type and its data such as login data
@@ -633,6 +625,12 @@ impl CommandTypes {
     }
 }
 
+#[derive(Debug)]
+pub struct CommandTypeKeyDiff<'s> { 
+    name: &'s str,
+    value: &'s str
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub struct SessionData {
     timestamp: u128,
@@ -644,25 +642,6 @@ pub struct SessionData {
 pub struct CommmunicationEncryption {
     aes_gcm_key: String,
     nonce: String
-}
-
-type AesKeyHexString = String;
-type AesNonceHexString = String;
-#[allow(dead_code)]
-/// Modes available for generate rsa keys
-enum GenRsaModes {
-    /// Generate keys and return its both from generator function in PEM formats as string separate public and sep private
-    Normal,
-    /// Generate Keys in PEM format and save them into separate files in folder for KEYS (replacing old keys when it exists)
-    SaveToFiles
-}
-#[allow(dead_code)]
-/// Representation of both rsa keys
-enum GetRsaKey {
-    /// Public key
-    Public,
-    /// Private key
-    Private
 }
 /// Valulable interface for ensure private, secure exchange data between client and SQL database
 impl CommmunicationEncryption {
@@ -856,13 +835,32 @@ impl CommmunicationEncryption {
     }
 }
 
-/// Code and decode connection. From HEX to string UTF-8
+type AesKeyHexString = String;
+type AesNonceHexString = String;
+#[allow(dead_code)]
+/// Modes available for generate rsa keys
+enum GenRsaModes {
+    /// Generate keys and return its both from generator function in PEM formats as string separate public and sep private
+    Normal,
+    /// Generate Keys in PEM format and save them into separate files in folder for KEYS (replacing old keys when it exists)
+    SaveToFiles
+}
+#[allow(dead_code)]
+/// Representation of both rsa keys
+enum GetRsaKey {
+    /// Public key
+    Public,
+    /// Private key
+    Private
+}
+
+/// Code and decode connection. From HEX to string UTF-8 and in invert
 /// Decoded String to be properly decoded must has got 2 characters
 /// Situation that some charcater after encode/decode has got/should has got more then 2 characters is probable
-struct ConnectionCodec;
+pub struct ConnectionCodec;
 impl ConnectionCodec {
     // Code message to hex format
-    fn code_hex(message: String) -> String {
+    pub fn code_hex(message: String) -> String {
         let message = message.as_bytes();
         let mut hexes = vec![] as Vec<String>;
         
@@ -874,28 +872,20 @@ impl ConnectionCodec {
     }
 
     /// Decode message from hex format to utf-8
-    fn decode_hex(message: String) -> String {
-        let splitted = message.as_bytes().chunks(2).map(str::from_utf8).collect::<Result<Vec<&str>, _>>().expect("Couldn't create HEX chunks");
+    pub fn decode_hex(message: String) -> Result<String, ()> {
+        // After operation from 1 character HEX code you can create UTF-8 character (for clarity one UTF-8 character after encoding to HEX should create HEX code consists from 2 characters i.e: 2F)
+        let splitted = message.as_bytes().chunks(2).map(str::from_utf8).collect::<Result<Vec<&str>, _>>().map_err(|_| ())?;
         let mut decoded_bytes = Vec::new() as Vec<u8>;
 
         // Iterate over each character presented under HEX code in 2 charcters i.e: 2F (UTF-8 character is: \)
         for splitted_char in splitted {
-            let byte_utf8 = u8::from_str_radix(splitted_char, 16).expect("Couldn't decode hex string fragment to utf-8 byte");
+            let byte_utf8 = u8::from_str_radix(splitted_char, 16).map_err(|_| ())?; // when error return it directly from loop
             decoded_bytes.push(byte_utf8);
         }
 
-        // Return utf-8 string created from HEX by that whole callable unit
-        String::from_utf8(decoded_bytes).expect("Couldn't convert byte to valid utf-8 string")
+        // Return utf-8 string created from HEX by that whole callable unit or Err
+        String::from_utf8(decoded_bytes).map_err(|_| ())
     }
-}
-
-#[cfg(test)]
-#[test]
-fn code_decode_hex() {
-    let message_for_op = format!("hello worldi");
-    let coded = ConnectionCodec::code_hex(message_for_op);
-    let decoded = ConnectionCodec::decode_hex(coded.clone());
-    println!("Coded HEX message: {cod}\nDecoded message from HEX, valid UTF-8: {dec}", cod = coded, dec = decoded)
 }
 
 // Callculate timestamp (how much milliseconds flow from 1 January 1970 to function invoke time)
@@ -906,40 +896,7 @@ fn get_timestamp() -> u128 {
     }
 }
 
-// Call as 2
-// Handle pending request and return request message when it is correct
-// Err -> when: couldn't read request, colund't convert request to utf-8 string
-fn handle_request(stream: &mut TcpStream) -> Result<String, ()> {
-    // Recive Request
-    let mut req_buf = [0; inter::MAXIMUM_REQUEST_SIZE_BYTES];
-    match stream.read(&mut req_buf) {
-        Ok(_size) => {
-            // Create String from response
-            let mut intermediate_b = Vec::<u8>::new();
-            
-                //... add to "intermediate" bytes other then "0" 
-            for byte in req_buf {
-                if byte == 0 {
-                    break;
-                };
-                intermediate_b.push(byte);
-            };
-
-                //... convert "intermediate" to String and return it or error
-            if let Ok(c_request) = String::from_utf8(intermediate_b) {
-                Ok(c_request)
-            }
-            else {
-                return Err(())
-            }
-        },
-        Err(_) => {
-            Err(())
-        }
-    }
-}
-
-// "Call as 2"
+// "Call as 3"
 // Recoginize commands and parse it then return Ok() when both steps was berformed correctly or return Err() when these both steps couldn't be performed. Error is returned as ErrorResponseKinds enum which can be handled directly by put it into enum "ResponseTypes" and call to method ".handle_response(tcp_stream)"
 fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>) -> Result<CommandTypes, ErrorResponseKinds> {
     let message_semi_spli = c_req.split(";").collect::<Vec<&str>>(); // split message using semicolon
@@ -973,6 +930,37 @@ fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>
     else { // when after separation message by its parts exists less or equal to 1 part in Vector
         Err(ErrorResponseKinds::IncorrectRequest)
     }
+}
+
+// Call as 2
+// Handle pending request and return request message when it is correct
+// Err -> when: couldn't read request, colund't convert request to utf-8 string, couldn't decode hex codes to utf-8 character
+fn handle_request(stream: &mut TcpStream) -> Result<String, ()> {
+    // Recive Request
+    let mut req_buf = [0; inter::MAXIMUM_REQUEST_SIZE_BYTES];
+    // Read stream content and write it to intermediate buffer
+    stream.read(&mut req_buf).map_err(|_| ())?;
+    
+    // Operation will creating String from request bytes
+    let mut intermediate_b = Vec::<u8>::new();
+    
+    // Add to "intermediate" buffer all bytes different then "0" (null byte)
+    for byte in req_buf {
+        if byte == 0 {
+            break;
+        };
+        intermediate_b.push(byte);
+    };
+
+    // Convert to not separated HEX codes string
+    let hex_cstring_request = String::from_utf8(intermediate_b).map_err(|_| ())?;
+        
+    // Create from not-separated hex codes string, valid utf-8 string or propagate error
+    let decoded_letters = ConnectionCodec::decode_hex(hex_cstring_request)?;
+
+    // Return UTF-8 response
+    println!("{}", decoded_letters);
+    Ok(decoded_letters)
 }
 
 // "Call from outside to connect all chunks together"
@@ -1010,7 +998,7 @@ pub async fn handle_tcp() {
                 Ok(c_req) => {
                     let mut sessions = sessions.lock().unwrap();
                     
-                    /* Do more... */
+                    /*  */
                     match process_request(c_req.clone(), Some(&mut sessions)) {
                         Ok(command_type) => {
                             match command_type {
@@ -1259,5 +1247,14 @@ mod tests {
     
         // Show results as whole operation finall result
         println!("Datas to decrypt message are: {}\nMessage body is: {}", data_to_decrypt_string, data_message_string)
+    }
+
+    #[test]
+    fn code_decode_hex() {
+        use super::ConnectionCodec;
+        let message_for_op = format!("hello worldi");
+        let coded = ConnectionCodec::code_hex(message_for_op);
+        let decoded = ConnectionCodec::decode_hex(coded.clone());
+        println!("Coded HEX message: {cod}\nDecoded message from HEX, valid UTF-8: {dec}", cod = coded, dec = decoded.unwrap())
     }
 }
