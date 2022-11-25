@@ -89,6 +89,8 @@ pub mod tests {
     use login_module::authenticate_user;
     use std::str;
     use format as f;
+    use crate::connection::tcp::CommmunicationEncryption;
+
     use super::inter::MAXIMUM_RESPONSE_SIZE_BYTES;
 
     use rsa::{self,  pkcs1::{self, DecodeRsaPublicKey, DecodeRsaPrivateKey} };
@@ -164,6 +166,24 @@ pub mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(100));
         stream.read(rcnt).unwrap();
+    }
+
+    #[test]
+    fn tcp_initialize_encryption() { // test command which is for intiialize encryption between 2 communication sites
+        let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
+        
+        // Request
+            // When rsa option is picked (rsa|x=x|true ["|x=x|" is key->value separator]) then publick key wil be recived in response as last option
+        let as_hex = ConnectionCodec::code_hex("InitializeEncryption;".to_string());
+        connection.write(as_hex.as_bytes()).unwrap();
+
+        // Response
+        let mut buf = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
+        connection.read(&mut buf).expect("Couldn't read server response");
+
+        let resp_str = String::from_utf8(buf.to_vec()).expect("Coulnd't create utf-8 string with HEX codes string").replace("\0", ""); // + replace null character for elminate error durning decoding code to utf-8 cuz: in HEX letters range (0-F) control character \0 is absent
+        let resp_fr_hex = ConnectionCodec::decode_encrypted_message(resp_str).unwrap(); // Get from hex codes bytecodes of cipher letter represented by 2 character hex code
+        println!("{:?}", resp_fr_hex);
     }
 
     #[test]

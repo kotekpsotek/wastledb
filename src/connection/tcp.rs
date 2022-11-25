@@ -43,53 +43,62 @@ impl ResponseTypes {
     fn handle_response(&self, from_command: Option<CommandTypes>, stream: Option<TcpStream>, sessions: Option<&mut HashMap<String, String>>, session_id: Option<String>, response_content: Option<String>) {
         /// When user would like to encrypt message then encrypt or return message in raw format (that fact is inferred from SessionData struct by this function)
         fn response_message_generator(command_type: Option<CommandTypes>, sessions: Option<&mut HashMap<String, String>>, session_id: Option<String>, message: String) -> String {
-            if let Some(sess) = sessions {
-                if let Some(sess_id) = session_id {
-                    let session = sess.get(&sess_id);
-                    if session.is_some() {
-                        let session_data = serde_json::from_str::<SessionData>(session.unwrap()).unwrap();
-                        if let Some(encryption) = session_data.encryption {
-                            // Encrypt message using previous generated encryption datas
-                            let enc_message = CommmunicationEncryption::aes_256_gcm_encrypt(
+            if sessions.is_some() && session_id.is_some() {
+                let sessions = sessions.unwrap();
+                let session_id = session_id.unwrap();
+                
+                if let Some(session) = sessions.get(&session_id) {
+                    if let Some(encryption) = serde_json::from_str::<SessionData>(session).unwrap().encryption {
+                        if command_type.is_some() && matches!(command_type.as_ref().unwrap(), CommandTypes::InitializeEncryptionRes) {
+                            // When command type is InitializeEncryption then encrypt data to decrypt message using only dbs rsa private key
+                            let message_enc_bytes = CommmunicationEncryption::rsa_encrypt_message(message).unwrap();
+                            
+                            // Code message to hex format
+                            ConnectionCodec::code_encrypted_message(message_enc_bytes)
+                        }
+                        else {
+                            // Encrypt normal message using previous generated encryption datas
+                            /* let enc_message = CommmunicationEncryption::aes_256_gcm_encrypt(
                                 &encryption.aes_gcm_key, 
                                 CommmunicationEncryption::from_hex_to_vec_bytes(&encryption.nonce), 
                                 message.as_bytes()
                             );
                             let enc_message_hex = CommmunicationEncryption::convert_vec_bytes_to_hex(enc_message);
-                            
+
                             // Prepare encrypted message format
                                 // Plaintext info required to decrypt message body
                             let info_to_decrypt = {
                                 let mut inf = format!("nonce|x=x|{nonce}", nonce = encryption.nonce);
                                     // .. Aes key is attached only to register command and when command hasn't been entered. After when response has been achived by client Secret key is cached by client for whole ongoing connection 
-                                    // When command hasn't been entered that means that use can hasn't got cached AES Secret key (in situation when he didn't achived "Register" command response)
+                                        // When command hasn't been entered that means that use can hasn't got cached AES Secret key (in situation when he didn't achived "Register" command response)
                                 if command_type.is_none() || (command_type.is_some() && command_type.unwrap() == CommandTypes::Register) {
                                     let aes_key = format!(" 1-1 aes|x=x|{aes_key_t}", aes_key_t = encryption.aes_gcm_key);
                                     inf.push_str(&aes_key);
-                                }
+                                };
                                 inf
                             };
                                 // Ciphertext with information to decrypt message body / When Err(()) from encryption function then return empty string which will be send to client
-                            let ciphertext_info_message = CommmunicationEncryption::rsa_encrypt_message(info_to_decrypt)
+                            let key_nonce_encrypted = CommmunicationEncryption::rsa_encrypt_message(info_to_decrypt)
                                 .map_or_else(|_| String::new(), |enc_mes| enc_mes);
-
+                            
                             // Return formed message
-                            format!("{key_and_nonce};{message_body}", key_and_nonce = ciphertext_info_message, message_body = enc_message_hex)
-                        } 
-                        else {
-                            message
+                            format!("{key_and_nonce};{message_body}", key_and_nonce = key_nonce_encrypted, message_body = enc_message_hex) */
+                            String::new()
                         }
-                    }
+                    } 
                     else {
-                        message
+                        // Send message without any encryption but encoded as hex
+                        ConnectionCodec::code_hex(message)
                     }
                 }
                 else {
-                    message
+                    // Send message without any encryption but encoded as hex
+                    ConnectionCodec::code_hex(message)
                 }
             }
             else {
-                message
+                // Send message without any encryption but encoded as hex
+                ConnectionCodec::code_hex(message)
             }
         }
         
@@ -158,12 +167,10 @@ impl ResponseTypes {
         };
         match stream {
             Some(mut stri) => {
-                // Outcome Encrypted response message when user would like to have it or reponse in plaintext for example when from some reason couldn't encrypt message or user woudn't like to have encrypted connection
+                // Get ecrypted message and encoded to correct hex format
                 let ready_result_message_raw = response_message_generator(from_command, sessions, session_id, result_message);
-                // Convert response message to string with not sepparated hex codes
-                let response_in_hex = ConnectionCodec::code_hex(ready_result_message_raw);
                 // Send response when it is possible as hex codes under which can be ciphertext or plaintext depends on what user would like to have
-                let resp = stri.write(response_in_hex.as_bytes());
+                let resp = stri.write(ready_result_message_raw.as_bytes());
                 // Put appropriate action when response couldn't been send (prepared to send cuz RAII)
                 if let Err(_) = resp { // time when to user can't be send response because error is initialized durning creation of http server
                     couldnt_send_response();
@@ -202,6 +209,7 @@ enum CommandTypes {
     KeepAlive,
     Show,
     DatabaseConnect, // change database from which user is connected
+    InitializeEncryptionRes, // returned after detection "initializeencryptuon" command without any message body processing
     RegisterRes(LoginCommandData), // Result of parsing "Register" command recognizer prior as "Register" child
     KeepAliveRes(String, u128), // 1. Is for id of session retrived from msg_body, 2. Is for parse KeepAlive result where "u128" is generated timestamp of parse generation
     CommandRes(String), // 1. SQL query content is attached under
@@ -805,16 +813,15 @@ impl CommmunicationEncryption {
     }
 
     /// Encrypt message using RSA private key (designed for encrypt Secret Key and Nonce) (max length of encrypted message = mod from rsa key size)
-    /// Return when: Ok(_) = encrypted message in hex format (where hex values are sepparated using whitespace " "), Err(_) - "()" = "tuple type" without elements inside 
-    fn rsa_encrypt_message(msg: String) -> Result<String, ()> {
+    /// Return when: Ok(_) = encrypted message as bytes in vectror (where hex values are sepparated using whitespace " "), Err(_) - "()" = "tuple type" without elements inside 
+    fn rsa_encrypt_message(msg: String) -> Result<Vec<u8>, ()> {
         let private_key = Self::get_rsa_key(GetRsaKey::Private)?.0
             .map_or_else(|| Err(()), |key| Ok(key))?;
-        let encrypted_mess = private_key.encrypt(&mut rand::thread_rng(), PaddingScheme::new_pkcs1v15_encrypt(), msg.as_bytes())
+        let encrypted_mess_bytes = private_key.encrypt(&mut rand::thread_rng(), PaddingScheme::new_pkcs1v15_encrypt(), msg.as_bytes())
             .map_err(|_| ())?;
-        let encrypted_mess_hex = Self::convert_vec_bytes_to_hex(encrypted_mess);
         
-        // Return encrypted message as hex
-        Ok(encrypted_mess_hex)
+        // Return encrypted message as bytes
+        Ok(encrypted_mess_bytes)
     }
 
     /// Decrypt message using RSA public key (message to decrypt must be encrypted using RSA private key from same pair otherwise Err(() will be returned))
@@ -859,7 +866,7 @@ enum GetRsaKey {
 /// Situation that some charcater after encode/decode has got/should has got more then 2 characters is probable
 pub struct ConnectionCodec;
 impl ConnectionCodec {
-    // Code message to hex format
+    /// Code String message to hex format
     pub fn code_hex(message: String) -> String {
         let message = message.as_bytes();
         let mut hexes = vec![] as Vec<String>;
@@ -871,7 +878,17 @@ impl ConnectionCodec {
         hexes.join("")
     }
 
-    /// Decode message from hex format to utf-8
+    /// Encode encrypted message to string with hexes (Warning: Under each hex code isn't valid utf-8 character but ciphertext character)
+    pub fn code_encrypted_message(message: Vec<u8>) -> String {
+        let mut hexes = vec![] as Vec<String>;
+        for byte in message {
+            hexes.push(format!("{:X}", byte)) // each hex code has got this form: 1F (each letter has got minimum number of characters in hex so 2) (For most case code builded from 2 characters is sufficient)
+        }
+
+        hexes.join("")
+    }
+
+    /// Decode String message from hex format to utf-8
     pub fn decode_hex(message: String) -> Result<String, ()> {
         // After operation from 1 character HEX code you can create UTF-8 character (for clarity one UTF-8 character after encoding to HEX should create HEX code consists from 2 characters i.e: 2F)
         let splitted = message.as_bytes().chunks(2).map(str::from_utf8).collect::<Result<Vec<&str>, _>>().map_err(|_| ())?;
@@ -885,6 +902,22 @@ impl ConnectionCodec {
 
         // Return utf-8 string created from HEX by that whole callable unit or Err
         String::from_utf8(decoded_bytes).map_err(|_| ())
+    }
+
+    /// Decode ciphertext to ciphertext bytes
+    pub fn decode_encrypted_message(message: String) -> Result<Vec<u8>, ()> {
+        // After operation from 1 character HEX code you can create UTF-8 character (for clarity one UTF-8 character after encoding to HEX should create HEX code consists from 2 characters i.e: 2F)
+        let splitted = message.as_bytes().chunks(2).map(str::from_utf8).collect::<Result<Vec<&str>, _>>().map_err(|_| ())?;
+        let mut decoded_bytes = Vec::new() as Vec<u8>;
+
+        // Iterate over each character presented under HEX code in 2 charcters i.e: 2F (UTF-8 character is: \)
+        for splitted_char in splitted {
+            let byte_utf8 = u8::from_str_radix(splitted_char, 16).map_err(|_| ())?; // when error return it directly from loop
+            decoded_bytes.push(byte_utf8);
+        }
+
+        // Return decoded bytes
+        Ok(decoded_bytes)
     }
 }
 
@@ -911,6 +944,9 @@ fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>
         if message_type == "command" { // Execute command into db here
             CommandTypes::Command.parse_cmd(message_body, sessions)
         }
+        else if message_type == "initializeencryption" {
+            Ok(CommandTypes::InitializeEncryptionRes) // return directly without any processing because it isn't required
+        }
         else if message_type == "register" { // login user into database and save his session
             CommandTypes::Register.parse_cmd(message_body, None) // When Ok(_) is returned: CommandTypes::RegisterRes(LoginCommandData { login: String::new("login datas"), password: String::new("password datas") })
         }
@@ -932,6 +968,7 @@ fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>
     }
 }
 
+// TODO: Add session param and decryption message after decode from hex
 // Call as 2
 // Handle pending request and return request message when it is correct
 // Err -> when: couldn't read request, colund't convert request to utf-8 string, couldn't decode hex codes to utf-8 character
@@ -959,7 +996,6 @@ fn handle_request(stream: &mut TcpStream) -> Result<String, ()> {
     let decoded_letters = ConnectionCodec::decode_hex(hex_cstring_request)?;
 
     // Return UTF-8 response
-    println!("{}", decoded_letters);
     Ok(decoded_letters)
 }
 
@@ -1002,6 +1038,29 @@ pub async fn handle_tcp() {
                     match process_request(c_req.clone(), Some(&mut sessions)) {
                         Ok(command_type) => {
                             match command_type {
+                                // Create encryption between server and client
+                                CommandTypes::InitializeEncryptionRes => {
+                                    // That command create encrypted session and likely new session so it must be called firstly than other commands and among others "Register" command
+                                        // Data required to create encrypted communications for next commands
+                                    let aes_key = CommmunicationEncryption::gen_aes_key();
+                                    let (aes_nonce_string, _) = CommmunicationEncryption::gen_aes_nonce();
+                                    
+                                        // Create session with specjalized datas for encryption
+                                    let session_id = uuid::Uuid::new_v4().to_string();
+                                    let encrypted_sdat = SessionData {
+                                        timestamp: get_timestamp(),
+                                        connected_to_database: None,
+                                        encryption: Some(
+                                            CommmunicationEncryption { aes_gcm_key: aes_key.to_owned(), nonce: aes_nonce_string.to_owned() }
+                                        )
+                                    };
+                                    let encrypted_sdat = serde_json::to_string(&encrypted_sdat).unwrap();
+                                    sessions.insert(session_id.to_owned(), encrypted_sdat);
+
+                                        // Send response to client // response_cnt will be encrypted using RSA private key
+                                    let response_cnt = format!("aes|x=x|{aesk} 1-1 nonce|x=x|{nonce} 1-1 session_id|x=x|{sid}", aesk = aes_key, nonce = aes_nonce_string, sid = session_id);
+                                    ResponseTypes::Success(true).handle_response(Some(CommandTypes::InitializeEncryptionRes), Some(stream), Some(&mut *sessions), Some(session_id), Some(response_cnt))
+                                },
                                 // Save user session
                                 CommandTypes::RegisterRes(LoginCommandData { login, password, connected_to_db, use_rsa }) => {
                                     // ...Check login corecteness
@@ -1125,11 +1184,11 @@ pub async fn handle_tcp() {
     }
 }
 
-
 #[cfg(all(test))]
 mod tests {
-    use std::borrow::Borrow;
+    use std::{borrow::Borrow, collections::btree_map::Range};
 
+    use generic_array::typenum::private::IsGreaterPrivate;
     use rsa::{PublicKey, PaddingScheme};
 
     use super::CommmunicationEncryption;
@@ -1186,7 +1245,7 @@ mod tests {
     #[test]
     fn encrypt_rsa() {
         let encrypted_message = CommmunicationEncryption::rsa_encrypt_message("Encrypted message using RSA".to_string()).expect("Couldn't encrypt message using RSA algo");
-        println!("{}", encrypted_message)
+        println!("{:?}", encrypted_message)
     }
 
     #[test]
@@ -1255,6 +1314,6 @@ mod tests {
         let message_for_op = format!("hello worldi");
         let coded = ConnectionCodec::code_hex(message_for_op);
         let decoded = ConnectionCodec::decode_hex(coded.clone());
-        println!("Coded HEX message: {cod}\nDecoded message from HEX, valid UTF-8: {dec}", cod = coded, dec = decoded.unwrap())
+        println!("Coded HEX message: {cod}\nDecoded message from HEX, valid UTF-8: {dec}", cod = coded, dec = decoded.unwrap());
     }
 }
