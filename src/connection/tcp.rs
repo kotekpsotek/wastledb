@@ -60,7 +60,7 @@ impl ResponseTypes {
                             // Encrypt normal message using previous generated encryption datas
                             /* let enc_message = CommmunicationEncryption::aes_256_gcm_encrypt(
                                 &encryption.aes_gcm_key, 
-                                CommmunicationEncryption::from_hex_to_vec_bytes(&encryption.nonce), 
+                                CommmunicationEncryption::from_hex_to_vec_bytes(&encryption.nonce),
                                 message.as_bytes()
                             );
                             let enc_message_hex = CommmunicationEncryption::convert_vec_bytes_to_hex(enc_message);
@@ -654,30 +654,6 @@ pub struct CommmunicationEncryption {
 /// Valulable interface for ensure private, secure exchange data between client and SQL database
 impl CommmunicationEncryption {
     const FOLDER_TO_RSA_KEYS: &str = "keys";
-
-    /// Convert Vector<u8> (containing bytes) to hex string which values are separated by whitespace " "
-    fn convert_vec_bytes_to_hex(vec_bytes: Vec<u8>) -> String {
-        let mut result_str = Vec::new() as Vec<String>;
-        for byte in vec_bytes {
-            let str_r = format!("{:X}", byte);
-            result_str.push(str_r);
-        }
-
-        result_str.join(" ")
-    }
-
-    /// Convert from Vec<String> (containing hexes) to Vector with u8. You should worry: because here aren't any ensures that byte is correct utf-8/ascii encoding byte like in AES-256-gcm storing format (always in hex)
-    fn from_hex_to_vec_bytes(hex_string: &String) -> Vec<u8> {
-        let hex_vec = hex_string.split(" ").map(|val| val.to_string()).collect::<Vec<String>>();
-        let mut vec_u8: Vec<u8> = Vec::new();
-
-        for hex_str in hex_vec {
-            let u8_str = u8::from_str_radix(&hex_str, 16).expect("Coluldn't convert hex to byte again");
-            vec_u8.push(u8_str);
-        }
-
-        vec_u8
-    }
     
     /// Generate RSA keys (public, private) and return in PEM format
     fn gen_rsa_keys(mode: GenRsaModes) -> Result<(Option<String>, Option<String>), ()> {
@@ -754,7 +730,7 @@ impl CommmunicationEncryption {
         // Generate nonce and convert it to hex
         let nonce_slice = vec![0; 12];
         let nonce: &GenericArray<u8, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>> = &Nonce::from_slice(&nonce_slice[..]); // 256-bits; unique per message (means: created in first and re-generated in each next new response)
-        let string_hex_nonce = Self::convert_vec_bytes_to_hex(nonce.to_vec());
+        let string_hex_nonce = ConnectionCodec::code_encrypted_message(nonce.to_vec()); // hex codes without gaps between each
 
         // branchback
         (string_hex_nonce, nonce_slice) // 1 - nonce in hex string format, 2 - nonce in bytes
@@ -766,7 +742,7 @@ impl CommmunicationEncryption {
         let aes_key = Aes256Gcm::generate_key(&mut OsRng);
         
         // Convert aes key hex
-        let string_hex_aes_key = Self::convert_vec_bytes_to_hex(aes_key.to_vec()); // obtain Vec<u8> (Vector with bytes) to hex format then create from outcoming Vec String by separate hex values using "whitespace character"
+        let string_hex_aes_key = ConnectionCodec::code_encrypted_message(aes_key.to_vec()); // outcome hex codes without gaps between each others
 
         // branchback
         string_hex_aes_key
@@ -774,14 +750,14 @@ impl CommmunicationEncryption {
 
     /// Obtain AES key from previous saved hex string
     fn aes_obtain_key(key_str_hex: &String) -> GenericArray::<u8, UInt<UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>, B0>> {
-        let key_vec = Self::from_hex_to_vec_bytes(key_str_hex);
+        let key_vec = ConnectionCodec::decode_encrypted_message(key_str_hex.clone()).expect("Couldn't obtain bytes vector from aes key in hex format");
         let ready_encrypt_key = GenericArray::<u8, UInt<UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>, B0>>::from_slice(&key_vec[..]);
         
         // Aes key
         ready_encrypt_key.to_owned()
     }
 
-    /// Encrypt message using AES-256-GCM. Return: 1 - Ciphertext in bytes form (not correct on utf-8 sake)
+    /// Encrypt message using AES-256-GCM. Return Ciphertext in bytes placed into Vector (Remember that under this vector isn't valid utf-8 characters required via Rust default encoding for String types)
     fn aes_256_gcm_encrypt(key_str_hex: &String, nonce: Vec<u8>, msg: &[u8]) -> Vec<u8> {
         // Obtain previous generated AES key
         let ready_encrypt_key = Self::aes_obtain_key(key_str_hex);
@@ -795,18 +771,15 @@ impl CommmunicationEncryption {
         ciphertext
     }
 
-    /// Decrypt message encrypted using AES-256-GCM
-    fn aes_256_gcm_decrypt(key_str_hex: &String, nonce: Vec<u8>, msg_hex: &String) -> Result<Vec<u8>, ()> {
+    /// Decrypt message encrypted using AES-256-GCM. Message to decrypt must be in vector with bytes obtained after decoding encrypted message. Return Vector with valid UTF-8 bytes
+    fn aes_256_gcm_decrypt(key_str_hex: &String, nonce: Vec<u8>, msg: Vec<u8>) -> Result<Vec<u8>, ()> {
         // Obtain previous generated AES key
         let ready_encrypt_key = Self::aes_obtain_key(key_str_hex);
-
-        // Convert message to decrypt from Hex format
-        let message_vec_bytes = Self::from_hex_to_vec_bytes(msg_hex);
 
         // Decrypt message using key and nonce
         let cipher = Aes256Gcm::new(&ready_encrypt_key);
         let nonce = Nonce::from_slice(&nonce[..]);
-        let plaintext = cipher.decrypt(nonce,&message_vec_bytes[..]).map_err(|_| ())?;
+        let plaintext = cipher.decrypt(nonce,&msg[..]).map_err(|_| ())?;
 
         // Return encrypted key when it can be encrypted
         Ok(plaintext)
@@ -829,7 +802,7 @@ impl CommmunicationEncryption {
     fn rsa_decrypt_message(msg_hex: String) -> Result<String, ()> {
         let public_key = Self::get_rsa_key(GetRsaKey::Private)?.0
             .map_or_else(|| Err(()), |key| Ok(key))?;
-        let encrypted_mess_bytes = Self::from_hex_to_vec_bytes(&msg_hex);
+        let encrypted_mess_bytes = ConnectionCodec::decode_encrypted_message(msg_hex).expect("Couldn't convert message from hex string to bytes vec");
         let decrypted_mess = public_key.decrypt(PaddingScheme::new_pkcs1v15_encrypt(), &encrypted_mess_bytes[..])
             .map_or_else(|_| Err(()), |enc| {
                 // Try convert decrypted message to UTF-8 / When couldn't then return Err(()) in order to propagate him outside clausure 
@@ -882,7 +855,7 @@ impl ConnectionCodec {
     pub fn code_encrypted_message(message: Vec<u8>) -> String {
         let mut hexes = vec![] as Vec<String>;
         for byte in message {
-            hexes.push(format!("{:X}", byte)) // each hex code has got this form: 1F (each letter has got minimum number of characters in hex so 2) (For most case code builded from 2 characters is sufficient)
+            hexes.push(format!("{:03X}", byte)) // difference regard to function "code_hex" each code consist from 3 chaarcters and when it is smaller then 3 characters then always bengins with 0 (empty character)
         }
 
         hexes.join("")
@@ -904,10 +877,10 @@ impl ConnectionCodec {
         String::from_utf8(decoded_bytes).map_err(|_| ())
     }
 
-    /// Decode ciphertext to ciphertext bytes
+    /// Decode ciphertext as hexes string to ciphertext bytes
     pub fn decode_encrypted_message(message: String) -> Result<Vec<u8>, ()> {
-        // After operation from 1 character HEX code you can create UTF-8 character (for clarity one UTF-8 character after encoding to HEX should create HEX code consists from 2 characters i.e: 2F)
-        let splitted = message.as_bytes().chunks(2).map(str::from_utf8).collect::<Result<Vec<&str>, _>>().map_err(|_| ())?;
+        // Each encrypted message code consists from 3 charcters (different then normal coding) (character which has got smaller code then 3 characters starts with HEX character 0 = Null to real code (different then 0))
+        let splitted = message.as_bytes().chunks(3).map(str::from_utf8).collect::<Result<Vec<&str>, _>>().map_err(|_| ())?;
         let mut decoded_bytes = Vec::new() as Vec<u8>;
 
         // Iterate over each character presented under HEX code in 2 charcters i.e: 2F (UTF-8 character is: \)
@@ -1185,135 +1158,36 @@ pub async fn handle_tcp() {
 }
 
 #[cfg(all(test))]
-mod tests {
-    use std::{borrow::Borrow, collections::btree_map::Range};
-
-    use generic_array::typenum::private::IsGreaterPrivate;
-    use rsa::{PublicKey, PaddingScheme};
-
-    use super::CommmunicationEncryption;
-
-    /* #[test]
-    fn ks() {
-        use aes_gcm::{
-            aead::{Aead, KeyInit, OsRng},
-            Aes256Gcm, Nonce // Or `Aes128Gcm`
-        };
-        
-        let key = Aes256Gcm::generate_key(&mut OsRng);
-        let cipher = Aes256Gcm::new(&key);
-        let nonce_slice = vec![0; 12];
-        let nonce = Nonce::from_slice(nonce_slice.as_bytes()); // 96-bits; unique per message
-        let ciphertext = cipher.encrypt(nonce, b"plaintext message".as_ref()).unwrap();
-        let plaintext = cipher.decrypt(nonce, ciphertext.as_ref()).unwrap();
-    } */
+mod encryption_tests {
+    use super::{ CommmunicationEncryption, ConnectionCodec , GenRsaModes };
 
     #[test]
-    fn enc_keys() {
+    fn all_encryptions() {
+        // RSA
+        let rsa_key_pair = CommmunicationEncryption::gen_rsa_keys(GenRsaModes::Normal).unwrap();
+            // Encryption
+        let mess_for_rsa = "hello mumy!";
+        let mes_enc_rsa_bytes = CommmunicationEncryption::rsa_encrypt_message(mess_for_rsa.to_string()).expect("Couldn't encrypt message using RSA");
+        let mes_enc_rsa = ConnectionCodec::code_encrypted_message(mes_enc_rsa_bytes); // after encode to hex string under each character hex code isn't valid utf-8 character!
+        println!("RSA encryption: {}", mes_enc_rsa);
+            // Decryption
+        let dec_rsa_mes = CommmunicationEncryption::rsa_decrypt_message(mes_enc_rsa).expect("Couldn't decrypt message using rsa");
+        println!("RSA decryption: {}", dec_rsa_mes);
+
+        print!("\n\n");
+
+        // AES
         let aes_key = CommmunicationEncryption::gen_aes_key();
-        let aes_nonce = CommmunicationEncryption::gen_aes_nonce(); // 1. Nonce hex string, 2. Nonce bytes Vector
-
-        // Below: Convert aes_key stored as String to Vec<u8> only that convertion allow to create same AesKey to in encode and decode messages by one
-        let aes_key_bytes = CommmunicationEncryption::from_hex_to_vec_bytes(aes_key.borrow());
-        println!("Aes key in u8 after decryption: {:?}", aes_key_bytes);
-
-        // Below: Complete process End-To-End Encrypt message using pre-generated keys and decrypt it again
-        let encryption_result = CommmunicationEncryption::aes_256_gcm_encrypt(aes_key.borrow(), aes_nonce.1.clone(), b"message to decrypt");
-        println!("Encryption result (in bytes): {:?}", encryption_result);
-        let encrypted_message_hex = CommmunicationEncryption::convert_vec_bytes_to_hex(encryption_result);
-        println!("Convert encrypted message result to hex (in hex): {}", encrypted_message_hex);
-        let decryption_results = CommmunicationEncryption::aes_256_gcm_decrypt(&aes_key, aes_nonce.1, &encrypted_message_hex).expect("Message couldn't been decrypted!");
-        println!("Result of decryption of message (in bytes): {:?}", decryption_results);
-        let again_to_string = String::from_utf8(decryption_results).expect("Couldn't convert encrypted message to utf-8 string (rather some byte isn't correct with utf-8 characters bytes)");
-        println!("Decrypted message as string (utf-8 string): {}", again_to_string)
-    }
-
-    #[test]
-    /// Test/Generate RSA key-pair to .pem files located into "./keys" folder (in same location as "src" folder is nested)
-    fn save_rsa_pem_files() {
-        let save_files_result = CommmunicationEncryption::gen_rsa_keys(super::GenRsaModes::SaveToFiles).expect("Couldn't save files with RSA PEM keys");
-        println!("{:?}", save_files_result);
-    }
-
-    #[test]
-    /// Generate RSA keys-pair without save it to some file
-    fn generate_rsa_in_pem() {
-        let genrate_rsa_result = CommmunicationEncryption::gen_rsa_keys(super::GenRsaModes::Normal).expect("Couldn't generate RSA keys-pair"); // if no panic then 2 rsa keys in 2 Some variants should be returned in tuple like (private keys, public key) 
-        println!("{:?}", genrate_rsa_result);
-    }
-
-    #[test]
-    fn encrypt_rsa() {
-        let encrypted_message = CommmunicationEncryption::rsa_encrypt_message("Encrypted message using RSA".to_string()).expect("Couldn't encrypt message using RSA algo");
-        println!("{:?}", encrypted_message)
-    }
-
-    #[test]
-    fn decrypt_rsa() {
-        let priv_key = CommmunicationEncryption::get_rsa_key(super::GetRsaKey::Private).unwrap().0.unwrap();
-        let mess_encrypted_privatek = priv_key.encrypt(&mut rand::thread_rng(), PaddingScheme::new_pkcs1v15_encrypt(), b"message encrypted using rsa").expect("Couldn't encrypt message using private RSA key");
-        let decrypt_message = CommmunicationEncryption::rsa_decrypt_message(CommmunicationEncryption::convert_vec_bytes_to_hex(mess_encrypted_privatek.clone())).expect("Colund't decrypt message using RSA public key");
-        println!("Decrypted message: {}, Previous encrypted message: {:?}", decrypt_message, mess_encrypted_privatek);
-    }
-
-    #[test]
-    /// Works same as "register_user_by_tcp" but it is furthermore to decrypt response when previous user suggest option for "Register" Command as rsa=true
-    // Should be defined in "main.rs", but it is here because majority imports from test is defined in this file
-    fn register_and_decrypt() {
-        // obtain response message
-        let mut response = crate::tests::register_user_by_tcp();
-
-        // Replace "blank characters" from response to not obtain panics (while convertion from hex is processing)
-        response = response.replace("\0", "");
-
-        // split response message to two fragments
-        let data_split = response.split(";").collect::<Vec<_>>();
-
-        // obtain two response fragments (both are represented as HEX)
-        let data_to_decrypt_hex = data_split[0].to_string();
-        let data_message_hex = data_split[1].to_string();
-
-        // Convert message fragments from slice to vectors with message bytes
-        let data_to_decrypt = CommmunicationEncryption::from_hex_to_vec_bytes(&data_to_decrypt_hex);
-        // let data_message = CommmunicationEncryption::from_hex_to_vec_bytes(&data_message_hex); // unncecessary
-
-        // Decrypt "data_to_decrypt" fragment using RSA private key
-        let priv_key = CommmunicationEncryption::get_rsa_key(super::GetRsaKey::Private)
-            .expect("Couldn't get RSA private key")
-            .0.expect("Inside private key field is none");
-        let data_to_decrypt_decoded = priv_key.decrypt(super::PaddingScheme::new_pkcs1v15_encrypt(), &data_to_decrypt[..]).expect(r#"Couldn't decrypt "data to decrypt message body" using RSA Private Key"#);
-        
-        // Convert data to decrypt message to string in aim to allow decode response body and process it further
-        let data_to_decrypt_string = String::from_utf8(data_to_decrypt_decoded).expect(&format!("Couldn't convert {} to UTF-8 string", stringify!(data_to_decrypt)));
-
-        // Obtain from "data_to_decrpt" fargment valulable informations
-        let fragments = data_to_decrypt_string.split(" 1-1 ").collect::<Vec<_>>();
-            // Nonce data
-        let nonce_key_data = fragments[0];
-        let nonce_split = nonce_key_data.split("|x=x|").collect::<Vec<_>>();
-        let nonce_data_hex = nonce_split[1];
-        let nonce_data_bytes = CommmunicationEncryption::from_hex_to_vec_bytes(&nonce_data_hex.to_string());
-            // AES data
-        let aes_key_data = fragments[1];
-        let aes_key_data_split = aes_key_data.split("|x=x|").collect::<Vec<_>>();
-        let aes_key_data_data_hex = aes_key_data_split[1];
-
-        // Decrypt message body
-        let data_message_body_bytes = CommmunicationEncryption::aes_256_gcm_decrypt(aes_key_data_data_hex.to_string().borrow(), nonce_data_bytes, &data_message_hex).expect("Couldn't decode message body"); // converts directly message in hex format so manually (outside the function) isn't necessary to convert message with hex to bytes 
-
-        // Convert message body to string format
-        let data_message_string = String::from_utf8(data_message_body_bytes).expect(&format!("Couldn't convert {} to UTF-8 string", stringify!(data_message)));
-    
-        // Show results as whole operation finall result
-        println!("Datas to decrypt message are: {}\nMessage body is: {}", data_to_decrypt_string, data_message_string)
-    }
-
-    #[test]
-    fn code_decode_hex() {
-        use super::ConnectionCodec;
-        let message_for_op = format!("hello worldi");
-        let coded = ConnectionCodec::code_hex(message_for_op);
-        let decoded = ConnectionCodec::decode_hex(coded.clone());
-        println!("Coded HEX message: {cod}\nDecoded message from HEX, valid UTF-8: {dec}", cod = coded, dec = decoded.unwrap());
+        let aes_nonce = CommmunicationEncryption::gen_aes_nonce();
+        let aes_mess = "Toast smell like a toast!";
+            // Encryption
+        let enc_aes_mes = CommmunicationEncryption::aes_256_gcm_encrypt(&aes_key, aes_nonce.1.clone(), aes_mess.as_bytes());
+        let enc_aes_mes_hex = ConnectionCodec::code_encrypted_message(enc_aes_mes);
+        println!("Encrypted AES message in hex string: {}", enc_aes_mes_hex);
+            // Decryption
+        let dec_mes_in_bytes = ConnectionCodec::decode_encrypted_message(enc_aes_mes_hex).expect("Couldn't decode encrypted AES message from hex to bytes");
+        let dec_mes = CommmunicationEncryption::aes_256_gcm_decrypt(&aes_key, aes_nonce.1, dec_mes_in_bytes).expect("Couldn't decode AES encrypted message");
+        let dec_mes_string = String::from_utf8(dec_mes).expect("Couldn't create UTF-8 String from decrypted message bytes!");
+        println!("Decrypted message content: {}", dec_mes_string)
     }
 }

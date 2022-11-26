@@ -182,8 +182,8 @@ pub mod tests {
         connection.read(&mut buf).expect("Couldn't read server response");
 
         let resp_str = String::from_utf8(buf.to_vec()).expect("Coulnd't create utf-8 string with HEX codes string").replace("\0", ""); // + replace null character for elminate error durning decoding code to utf-8 cuz: in HEX letters range (0-F) control character \0 is absent
-        let resp_fr_hex = ConnectionCodec::decode_encrypted_message(resp_str).unwrap(); // Get from hex codes bytecodes of cipher letter represented by 2 character hex code
-        println!("{:?}", resp_fr_hex);
+        let resp_fr_hex_bytes = ConnectionCodec::decode_encrypted_message(resp_str).unwrap(); // Get from hex codes bytecodes of cipher letter represented by 2 character hex code
+        println!("{:?}", resp_fr_hex_bytes);
     }
 
     #[test]
