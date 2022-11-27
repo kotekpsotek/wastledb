@@ -193,10 +193,10 @@ enum CommandTypes {
     DatabaseConnect, // change database from which user is connected
     InitializeEncryptionRes, // returned after detection "initializeencryptuon" command without any message body processing
     RegisterRes(LoginCommandData), // Result of parsing "Register" command recognizer prior as "Register" child
-    KeepAliveRes(String, u128), // 1. Is for id of session retrived from msg_body, 2. Is for parse KeepAlive result where "u128" is generated timestamp of parse generation
+    KeepAliveRes(Option<String>, u128), // 1. Is for id of session retrived from msg_body / None (when connection is encrypted because session id in that time is returned in tuple), 2. Is for parse KeepAlive result where "u128" is generated timestamp of parse generation
     CommandRes(String), // 1. SQL query content is attached under
     ShowRes(String), // Outcome to show into String type
-    DatabaseConnectRes(String, String) // 1. Database name, 2. Session ID
+    DatabaseConnectRes(String, Option<String>) // 1. Database name, 2. Session ID / None (when connection is encrypted because session id in that time is returned in tuple)
 }
 // Distinguish command and return deserialized data from it
 impl CommandTypes {
@@ -204,7 +204,7 @@ impl CommandTypes {
     // Return command type and its data such as login data
     // SQL query are processed inside
     #[allow(unused_must_use)] // Err should be ignored only for inside call where are confidence of correcteness
-    fn parse_cmd(&self, msg_body: &str, sessions: Option<&mut HashMap<String, String>>) -> Result<CommandTypes, ErrorResponseKinds> {
+    fn parse_cmd(&self, msg_body: &str, sessions: Option<&mut HashMap<String, String>>, connection_encrypted: bool) -> Result<CommandTypes, ErrorResponseKinds> {
         if matches!(self, Self::Register) { // command to login user and setup connection
             if msg_body.len() > 0 {
                 let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
@@ -271,10 +271,15 @@ impl CommandTypes {
         else if matches!(self, Self::KeepAlive) { // command for extend session life
             let sessions = sessions.expect("Sessions mustn't be None value");
             if sessions.contains_key(msg_body) {
-                let ses_id = msg_body;
+                let ses_id = if !connection_encrypted {
+                    msg_body.to_string()
+                }
+                else {
+                    String::new()
+                };
 
                     //...Get session data and parse it from json format
-                let json_session_data = sessions.get(ses_id).unwrap();
+                let json_session_data = sessions.get(&ses_id).unwrap();
                 let session_data_struct = serde_json::from_str::<SessionData>(json_session_data).unwrap(); // we assume that in session storage are only correct values!
 
                     //...Retrive timestamp from session data and generate new timestamp to comparison
@@ -283,7 +288,13 @@ impl CommandTypes {
 
                     //...Test Whether session expiration can be extended and extend when can be 
                 if (timestamp + inter::MAXIMUM_SESSION_LIVE_TIME_MILS) >= timestamp_new {
-                    Ok(CommandTypes::KeepAliveRes(ses_id.to_string(), timestamp_new))
+                    let ses_id_res = if connection_encrypted && ses_id.len() == 0 {
+                            Some(ses_id)
+                        }
+                        else {
+                            None
+                        };
+                    Ok(CommandTypes::KeepAliveRes(ses_id_res, timestamp_new))
                 }
                 else {
                     Err(ErrorResponseKinds::SessionTimeExpired)
@@ -538,6 +549,7 @@ impl CommandTypes {
             }
         }
         else if matches!(self, Self::DatabaseConnect) { // connect user with specific database name // user must be singin with database prior
+            // TODO: 
             let msb_sp = msg_body.split(" 1-1 ").collect::<Vec<_>>();
             if msb_sp.len() == 2 {
                 let db_name = self.clone().parse_key_value(msb_sp[0]);
@@ -552,7 +564,7 @@ impl CommandTypes {
                             // Extend session live time after call this command (by emulate KeepAlive command manually)
                             CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions.unwrap()));
 
-                            Ok(CommandTypes::DatabaseConnectRes(db_name.value.to_string(), session_id.value.to_string()))
+                            Ok(CommandTypes::DatabaseConnectRes(db_name.value.to_string(), Some(session_id.value.to_string())))
                         }
                         else {
                             Err(ErrorResponseKinds::GivenSessionDoesntExists)
@@ -1019,7 +1031,7 @@ pub async fn handle_tcp() {
                     /*  */
                     let sc = sessions.clone(); // sessions 
                     let pr = process_request(c_req.clone(), Some(&mut sessions));
-                    // Check whether recived session id is correct when encrypted connection was established
+                    // Check whether recived session id is encrypted and whether it is correct when encrypted connection was established
                     let check_sid_u_enc = |sessions: &HashMap<String, String>| {
                         if let Some(sid) = &pr.0 {
                             if sessions.contains_key(sid) {
@@ -1071,8 +1083,8 @@ pub async fn handle_tcp() {
                                         _ => ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response( Some(CommandTypes::Register), Some(&stream), None, None, None)
                                     };
 
-                                    if pr.0.is_some() && check_sid_u_enc(&sc) {
-                                        // When encrypted session has been established
+                                    if check_sid_u_enc(&sc) {
+                                        // When encrypted session was established
                                         if authenticate_user(login, password) {
                                             // update session data
                                             let sd = sc.get(pr.0.as_ref().unwrap()).unwrap();
@@ -1101,21 +1113,24 @@ pub async fn handle_tcp() {
                                     }
                                 },
                                 CommandTypes::KeepAliveRes(ses_id, timestamp) => { // command to extend session life (heartbeat system -> so keep-alive)
-                                    // extend session to new timestamp
+                                    let keep_alive_ac = |ses_id| {
+                                        // extend session to new timestamp
                                         //...Parse extended session timestamp to other not changed session data
-                                    let old_session_data = sessions.get(&ses_id).unwrap(); // assumes that in this place session must exists and is able to be extended
-                                    let new_sess_data = SessionData {
-                                        timestamp,
-                                        ..serde_json::from_str::<SessionData>(old_session_data).unwrap()
+                                        let old_session_data = sessions.get(&ses_id).unwrap(); // assumes that in this place session must exists and is able to be extended
+                                        let new_sess_data = SessionData {
+                                            timestamp,
+                                            ..serde_json::from_str::<SessionData>(old_session_data).unwrap()
+                                        };
+                                        // println!("New: {:#?}\n\nOld: {:#?}", new_sess_data, old_session_data); //Test: integrity check log
+                                        let json_new_sess_data = serde_json::to_string(&new_sess_data).unwrap();
+                                            //...Update session
+                                        sessions.insert(ses_id.clone(), json_new_sess_data);
+    
+                                        println!("Session live time has been updated");
+                                            // Send response
+                                        ResponseTypes::Success(false).handle_response(Some(CommandTypes::KeepAlive), Some(&stream), Some(&mut *sessions), Some(ses_id), None)
                                     };
-                                    // println!("New: {:#?}\n\nOld: {:#?}", new_sess_data, old_session_data); //Test: integrity check log
-                                    let json_new_sess_data = serde_json::to_string(&new_sess_data).unwrap();
-                                        //...Update session
-                                    sessions.insert(ses_id.clone(), json_new_sess_data);
-
-                                    println!("Session live time has been updated");
-                                        // Send response
-                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::KeepAlive), Some(&stream), Some(&mut *sessions), Some(ses_id), None)
+                                    
                                 },
                                 CommandTypes::CommandRes(query) => {
                                     // Furthermore process query by database

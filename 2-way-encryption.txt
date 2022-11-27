@@ -15,4 +15,5 @@
 14. DBS and client after recived will cache such data: aes_key and nonce and won't attach them to next response,
 15. Session id always can't be encrypted whereby client request payload for encryption should looks like: CommandType;message_content(encrypted and encoded under hex);session_id where: only message_content is encrypted,
 16. Every encrypted message pieces: "CommandType", "message_content(Both encrypted)" and "session_id" ("CommandType;message_content(Both encrypted);session_id") are encoded to HEX using (code_hex (code to valid utf-8 characters code)),
-17. Only message content after encryption is encoded to not valid utf-8 hex
+17. Only message content after encryption is encoded to not valid utf-8 hex,
+18. Commands payload when communication is encrypying looks different i.e: KeepAlive;;session_id (normaly session id in this command is in message but in encrypted connection it is not and also session id isn't encrypted)
