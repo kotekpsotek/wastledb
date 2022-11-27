@@ -13,4 +13,6 @@
 12. All data sending from dbs and recived by client are encoded to hex,
 13. Client durning recived response from "InitializeEncryption" command will get rsa encrypted payload under which are: OK;aes|x=x|aes_key_hex 1-1 nonce|x=x|nonce_hex 1-1 session_id|x=x|session_id_as_uuidv4 (to obtain that message must be firstly decrypted from RSA ciphertext)
 14. DBS and client after recived will cache such data: aes_key and nonce and won't attach them to next response,
-15. Session id always can't be encrypted whereby client request payload for encryption should looks like: CommandType+message_content(Both encrypted);session_id
+15. Session id always can't be encrypted whereby client request payload for encryption should looks like: CommandType;message_content(encrypted and encoded under hex);session_id where: only message_content is encrypted,
+16. Every encrypted message pieces: "CommandType", "message_content(Both encrypted)" and "session_id" ("CommandType;message_content(Both encrypted);session_id") are encoded to HEX using (code_hex (code to valid utf-8 characters code)),
+17. Only message content after encryption is encoded to not valid utf-8 hex

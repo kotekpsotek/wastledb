@@ -612,7 +612,9 @@ pub struct SessionData {
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub struct CommmunicationEncryption {
+    /// AES key in hex string
     aes_gcm_key: String,
+    /// AES NONCE in hex string
     nonce: String
 }
 /// Valulable interface for ensure private, secure exchange data between client and SQL database
@@ -694,7 +696,7 @@ impl CommmunicationEncryption {
         // Generate nonce and convert it to hex
         let nonce_slice = vec![0; 12];
         let nonce: &GenericArray<u8, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>> = &Nonce::from_slice(&nonce_slice[..]); // 256-bits; unique per message (means: created in first and re-generated in each next new response)
-        let string_hex_nonce = ConnectionCodec::code_encrypted_message(nonce.to_vec()); // hex codes without gaps between each
+        let string_hex_nonce = ConnectionCodec::code_encrypted_message(nonce.to_vec()); // hex codes without gaps between each (not valid utf-8)
 
         // branchback
         (string_hex_nonce, nonce_slice) // 1 - nonce in hex string format, 2 - nonce in bytes
@@ -706,7 +708,7 @@ impl CommmunicationEncryption {
         let aes_key = Aes256Gcm::generate_key(&mut OsRng);
         
         // Convert aes key hex
-        let string_hex_aes_key = ConnectionCodec::code_encrypted_message(aes_key.to_vec()); // outcome hex codes without gaps between each others
+        let string_hex_aes_key = ConnectionCodec::code_encrypted_message(aes_key.to_vec()); // outcome hex codes without gaps between each others (not valid utf-8)
 
         // branchback
         string_hex_aes_key
@@ -722,7 +724,7 @@ impl CommmunicationEncryption {
     }
 
     /// Encrypt message using AES-256-GCM. Return Ciphertext in bytes placed into Vector (Remember that under this vector isn't valid utf-8 characters required via Rust default encoding for String types)
-    fn aes_256_gcm_encrypt(key_str_hex: &String, nonce: Vec<u8>, msg: &[u8]) -> Vec<u8> {
+    pub fn aes_256_gcm_encrypt(key_str_hex: &String, nonce: Vec<u8>, msg: &[u8]) -> Vec<u8> {
         // Obtain previous generated AES key
         let ready_encrypt_key = Self::aes_obtain_key(key_str_hex);
 
@@ -736,7 +738,7 @@ impl CommmunicationEncryption {
     }
 
     /// Decrypt message encrypted using AES-256-GCM. Message to decrypt must be in vector with bytes obtained after decoding encrypted message. Return Vector with valid UTF-8 bytes
-    fn aes_256_gcm_decrypt(key_str_hex: &String, nonce: Vec<u8>, msg: Vec<u8>) -> Result<Vec<u8>, ()> {
+    pub fn aes_256_gcm_decrypt(key_str_hex: &String, nonce: Vec<u8>, msg: Vec<u8>) -> Result<Vec<u8>, ()> {
         // Obtain previous generated AES key
         let ready_encrypt_key = Self::aes_obtain_key(key_str_hex);
 
@@ -871,20 +873,54 @@ fn get_timestamp() -> u128 {
 fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>) -> (Option<String>, Result<CommandTypes, ErrorResponseKinds>) {
     let message_semi_spli = (c_req).split(";").collect::<Vec<&str>>(); // split message using semicolon
     if message_semi_spli.len() > 1 { // must be at least 2 pieces: "Message Type" and second in LTF order "Message Body"
-            // mes type
-        let message_type = message_semi_spli[0].to_lowercase();
-        let message_type = message_type.as_str();
-            // mes body
-        let message_body = message_semi_spli[1];
-            // Session id exists only in this form when user established encrypted connection
-        let session_id = 
-            if message_semi_spli.len() == 3 {
-                Some(message_semi_spli[2].to_string())
+            // Session id exists only in this form when user established encrypted connection (When message is encrypted payload always consists from 3 pieces: Command, AES Encrypted and Encoded to not valid utf-8 HEX string, Session ID)
+        let session_id = if message_semi_spli.len() == 3 {
+                Some(message_semi_spli[2].to_string()) // Session id is always last
             }
             else {
                 None
             };
+            // mes type
+        let message_type = message_semi_spli[0].to_lowercase();
+        let message_type = message_type.as_str();
+            // mes body // When encryption was established decrypt it here
+        let message_body = {
+            let msb = match session_id {
+                Some(ref sid) => { // To perform decryption message must be in form specific for encryption
+                    // Try to obtain data to decrypt mes body and decrypt it after
+                    if let Some(ref sessions) = sessions { // sessions must be attached to function invoke
+                        if let Some(ses_dat) = sessions.get(sid) {
+                            let ses_dat = serde_json::from_str::<SessionData>(ses_dat).unwrap();
+                            if let Some(enc) = ses_dat.encryption {
+                                let nonce = ConnectionCodec::decode_encrypted_message(enc.nonce).unwrap();
+                                let aes_key = enc.aes_gcm_key;
+                                let message_to_decrypt_hex = message_semi_spli[1]; // Encrypted message is encoded to not-valid HEX so first must be decoded from that format to ciphertext (not valid utf-8 form)
+                                let message_to_decrypt_decoded = ConnectionCodec::decode_encrypted_message(message_to_decrypt_hex.to_string()).expect("Couldn't decode message");
 
+                                // Decrypt ciphertext to plaintext
+                                let dec_bytes = CommmunicationEncryption::aes_256_gcm_decrypt(&aes_key, nonce, message_to_decrypt_decoded).expect("Couldn't decrypt message");
+
+                                // Create UTF-8 string from decrypted plaintext bytes vector
+                                String::from_utf8(dec_bytes).unwrap()
+                            }
+                            else {
+                                message_semi_spli[1].to_string()
+                            }
+                        }
+                        else {
+                            message_semi_spli[1].to_string()
+                        }
+                    }
+                    else {
+                        message_semi_spli[1].to_string()
+                    }
+                },
+                None => message_semi_spli[1].to_string()
+            };
+            // Convert to &str type
+            &msb.clone()[..]
+        };
+        println!("mes body: {}", message_body);
 
         // Handle command
         if message_type == "command" { // Execute command into db here

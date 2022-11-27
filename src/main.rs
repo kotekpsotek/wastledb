@@ -85,7 +85,7 @@ pub mod tests {
     #[path = "../login-system.rs"]
     mod login_module;
 
-    use std::{ net::TcpStream, io::{Write, Read, BufReader, BufRead}, borrow::Borrow };
+    use std::{ net::TcpStream, io::{Write, Read, BufReader, BufRead}, borrow::Borrow, fmt::format };
     use login_module::authenticate_user;
     use std::str;
     use format as f;
@@ -115,21 +115,6 @@ pub mod tests {
         
         // // Return response
         from_hex
-    }
-
-    #[tokio::test]
-    // If you'd like to know why datadussion isn't good choisefor this case run this test
-    async fn data_fussion_test() {
-        let cx = SessionContext::new();
-        
-        // Register table to execute the query
-        let json = cx.register_json("example", "../source/dbs/dogo/mycat2.json", NdJsonReadOptions::default()).await.unwrap();
-
-        // Execute query
-        let qr = cx.sql("SELECT * FROM example").await.unwrap();
-
-        // Show query result/s
-        qr.show().await.unwrap();
     }
 
     /// Convert message body to ready to use passages
@@ -166,36 +151,6 @@ pub mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(100));
         stream.read(rcnt).unwrap();
-    }
-
-    #[test]
-    fn tcp_initialize_encryption() { // test command which is for intiialize encryption between 2 communication sites
-        let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
-        
-        // Request
-            // When rsa option is picked (rsa|x=x|true ["|x=x|" is key->value separator]) then publick key wil be recived in response as last option
-        let as_hex = ConnectionCodec::code_hex("InitializeEncryption;".to_string());
-        connection.write(as_hex.as_bytes()).unwrap();
-
-        // Response
-        let mut buf = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
-        connection.read(&mut buf).expect("Couldn't read server response");
-
-        let resp_str = String::from_utf8(buf.to_vec()).expect("Coulnd't create utf-8 string with HEX codes string").replace("\0", ""); // + replace null character for elminate error durning decoding code to utf-8 cuz: in HEX letters range (0-F) control character \0 is absent
-        // let resp_fr_hex_bytes = ConnectionCodec::decode_encrypted_message(resp_str).unwrap(); // Get from hex codes bytecodes of cipher letter represented by 2 character hex code
-        let decode_from_rsa = CommmunicationEncryption::rsa_decrypt_message(resp_str).expect("Couldn't decrypt message from rsa!");
-        println!("{}", decode_from_rsa);
-
-        // Stage 1: obtain response message and encrypted content in hex formats
-        /* let st1_decode = String::from_utf8(resp_fr_hex_bytes).expect("Couldn't perform stage 1 decoding");
-        let fragments = st1_decode.split(";").collect::<Vec<_>>();
-        let message_type = fragments[0];
-        let data_to_dec_mes = fragments[1];
-        let message_to_dec = fragments[2];
-
-        // Stage 2: obtain data ti decrypt message content
-        let data_to_dec_mes = CommmunicationEncryption::rsa_decrypt_message(data_to_dec_mes.to_string()).expect("Couldn't decrypt message required to obtain data to decrypt message content using symmetric encryption!");
-        println!("{}", data_to_dec_mes); */
     }
 
     #[test]
@@ -319,5 +274,77 @@ pub mod tests {
         let test_login = "tester".to_string();
         let test_password = "1234567890".to_string();
         println!("Authentication result: {}", authenticate_user(test_login, test_password));
+    }
+
+    // Tests on encrypted connection
+
+    /// Parsed key from encrypted connection
+    type Key = (String, String);
+    /// Encrypt user connection
+    fn encrypted_connection() -> (Key, Key, Key) { // -> AesKey, Nonce, Session ID
+        let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
+        
+        // Request
+            // When rsa option is picked (rsa|x=x|true ["|x=x|" is key->value separator]) then publick key wil be recived in response as last option
+        let as_hex = ConnectionCodec::code_hex("InitializeEncryption;".to_string());
+        connection.write(as_hex.as_bytes()).unwrap();
+    
+        // Response
+        let mut buf = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
+        connection.read(&mut buf).expect("Couldn't read server response");
+    
+        let resp_str = String::from_utf8(buf.to_vec()).expect("Coulnd't create utf-8 string with HEX codes string").replace("\0", ""); // + replace null character for elminate error durning decoding code to utf-8 cuz: in HEX letters range (0-F) control character \0 is absent
+        let dec_stri = CommmunicationEncryption::rsa_decrypt_message(resp_str).expect("Couldn't decrypt message from rsa!");
+    
+        // Parse decrypted stri
+        let sli = dec_stri.split(";").collect::<Vec<_>>()[1].split(" 1-1 ").collect::<Vec<_>>();
+        let parse_key_value = |key: usize| {
+            let choosen = sli[key].split("|x=x|").collect::<Vec<_>>();
+        
+            // key name, key value
+            (choosen[0].to_string(), choosen[1].to_string())
+        };
+        let parsed = (parse_key_value(0), parse_key_value(1), parse_key_value(2));
+        parsed
+    }
+    
+    fn register_secure((aes, nonce, session_id): (Key, Key, Key)) {
+        let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
+        
+        // Request
+            // Prepare message to send
+        let mes_cont = "login|x=x|tester 1-1 password|x=x|123456789 1-1 connect_auto|x=x|dogo".to_string();
+        let mes_enc = CommmunicationEncryption::aes_256_gcm_encrypt(&aes.1, ConnectionCodec::decode_encrypted_message(nonce.1.clone()).expect("couldn't decode nonce to vector"), mes_cont.as_bytes());
+        let mes_encoded = ConnectionCodec::code_encrypted_message(mes_enc);
+        let mess_form = format!("{com};{ms};{session_id}", com = "Register", ms = mes_encoded, session_id = session_id.1);
+        let mes_ready = ConnectionCodec::code_hex(mess_form);
+        
+            // Send request to dbs
+        connection.write(mes_ready.as_bytes()).unwrap();
+
+        // Response
+        let mut buf = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
+        connection.read(&mut buf).expect("Couldn't read server response");
+
+        let resp_str = String::from_utf8(buf.to_vec()).expect("Coulnd't create utf-8 string with HEX codes string").replace("\0", ""); // + replace null character for elminate error durning decoding code to utf-8 cuz: in HEX letters range (0-F) control character \0 is absent
+        let to_not_validutf8_hex = ConnectionCodec::decode_encrypted_message(resp_str).expect("Couldn't decode response from HEX"); // Decode hex to ciphertext (not valid utf-8)
+        
+        // Decode response
+        let dec_res = CommmunicationEncryption::aes_256_gcm_decrypt(&aes.1,  ConnectionCodec::decode_encrypted_message(nonce.1).expect("Couldn't decode nonce"), to_not_validutf8_hex).expect("Couldn't decode response");
+        let dec_res_stri = String::from_utf8(dec_res).expect("Couldn't create UTF-8 string from decoded message");
+
+        // // Return response
+        println!("{}", dec_res_stri)
+    }
+
+    #[test]
+    fn tcp_initialize_encryption() { // test command which is for intiialize encryption between 2 communication sites
+        let _ = self::encrypted_connection(); // AesKey, Nonce, Session ID
+    }
+
+    #[test]
+    fn tcp_register_secure() {
+        let data_to_ecn_connection = self::encrypted_connection(); 
+        self::register_secure(data_to_ecn_connection)
     }
 }
