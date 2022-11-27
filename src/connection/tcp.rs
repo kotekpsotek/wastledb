@@ -204,7 +204,7 @@ impl CommandTypes {
     // Return command type and its data such as login data
     // SQL query are processed inside
     #[allow(unused_must_use)] // Err should be ignored only for inside call where are confidence of correcteness
-    fn parse_cmd(&self, msg_body: &str, sessions: Option<&mut HashMap<String, String>>, connection_encrypted: bool) -> Result<CommandTypes, ErrorResponseKinds> {
+    fn parse_cmd(&self, msg_body: &str, sessions: Option<&mut HashMap<String, String>>, connection_encrypted: bool, additional_data: Option<&String>) -> Result<CommandTypes, ErrorResponseKinds> {
         if matches!(self, Self::Register) { // command to login user and setup connection
             if msg_body.len() > 0 {
                 let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
@@ -270,43 +270,50 @@ impl CommandTypes {
         }
         else if matches!(self, Self::KeepAlive) { // command for extend session life
             let sessions = sessions.expect("Sessions mustn't be None value");
-            if sessions.contains_key(msg_body) {
-                let ses_id = if !connection_encrypted {
-                    msg_body.to_string()
+            if !connection_encrypted {
+                // Parse only for not encrypted connection
+                if sessions.contains_key(msg_body) {
+                    let ses_id = if !connection_encrypted {
+                        msg_body.to_string()
+                    }
+                    else {
+                        String::new()
+                    };
+    
+                        //...Get session data and parse it from json format
+                    let json_session_data = sessions.get(&ses_id).unwrap();
+                    let session_data_struct = serde_json::from_str::<SessionData>(json_session_data).unwrap(); // we assume that in session storage are only correct values!
+    
+                        //...Retrive timestamp from session data and generate new timestamp to comparison
+                    let timestamp = session_data_struct.timestamp;
+                    let timestamp_new = get_timestamp();
+    
+                        //...Test Whether session expiration can be extended and extend when can be 
+                    if (timestamp + inter::MAXIMUM_SESSION_LIVE_TIME_MILS) >= timestamp_new {
+                        let ses_id_res = if connection_encrypted && ses_id.len() == 0 {
+                                Some(ses_id)
+                            }
+                            else {
+                                None
+                            };
+                        Ok(CommandTypes::KeepAliveRes(ses_id_res, timestamp_new))
+                    }
+                    else {
+                        Err(ErrorResponseKinds::SessionTimeExpired)
+                    }
                 }
                 else {
-                    String::new()
-                };
-
-                    //...Get session data and parse it from json format
-                let json_session_data = sessions.get(&ses_id).unwrap();
-                let session_data_struct = serde_json::from_str::<SessionData>(json_session_data).unwrap(); // we assume that in session storage are only correct values!
-
-                    //...Retrive timestamp from session data and generate new timestamp to comparison
-                let timestamp = session_data_struct.timestamp;
-                let timestamp_new = get_timestamp();
-
-                    //...Test Whether session expiration can be extended and extend when can be 
-                if (timestamp + inter::MAXIMUM_SESSION_LIVE_TIME_MILS) >= timestamp_new {
-                    let ses_id_res = if connection_encrypted && ses_id.len() == 0 {
-                            Some(ses_id)
-                        }
-                        else {
-                            None
-                        };
-                    Ok(CommandTypes::KeepAliveRes(ses_id_res, timestamp_new))
-                }
-                else {
-                    Err(ErrorResponseKinds::SessionTimeExpired)
+                    Err(ErrorResponseKinds::GivenSessionDoesntExists)
                 }
             }
             else {
-                Err(ErrorResponseKinds::GivenSessionDoesntExists)
+                // When connection is encrypted then session id isn't in body and hence it isn't parsed here
+                Ok(CommandTypes::KeepAliveRes(None, get_timestamp()))
             }
         }
         else if matches!(self, Self::Command) { // command for execute sql query in database
             let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
-            if msg_body_sep.len() >= 2 { // isnide login section must be minimum 2 pieces: 1 - sql_query|x=x|sql query which will be executed on db, 2 - ...described inside block, 3 - session_id|x=x|session_id
+            if msg_body_sep.len() >= 1 { // isnide login section must be minimum 2 pieces: 1 - sql_query|x=x|sql query which will be executed on db, 2 - ...described inside block, 3 - session_id|x=x|session_id
                 //... session
                 let request_session = self
                     .clone()
@@ -346,7 +353,7 @@ impl CommandTypes {
                         if let Some(CommandTypeKeyDiff { name, value }) = sql_query_key {
                             if name == "sql_query" && value.len() > 0 {
                                 // Extend session live time after call this command (by emulate KeepAlive command manually)
-                                CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions));
+                                CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions), connection_encrypted, None);
 
                                 // Process query + return processing result outside this method
                                 let q_processed_r = self::management::main::process_query(value, connect_auto, session_id.into(), sessions);
@@ -384,177 +391,204 @@ impl CommandTypes {
         }
         else if matches!(self, Self::Show) { // display tables list on database or specific table content
             let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
-            if msg_body_sep.len() == 3 { // msg body must include 3 keys in same order as entered here: 1. session_id|x=x|sessionID 2. what|x=x|database_tables/table 3. unit_name|x=x|database_name/table_name
+            if msg_body_sep.len() >= 2 { // msg body must include 2 keys in same order as entered here: 1. session_id|x=x|sessionID 2. what|x=x|database_tables/table 3. unit_name|x=x|database_name/table_name (session id doesn't exists in message body when communication is encrypted but it is attached from outside to this function "additional_data" param)
                 let what_key_val = self.clone().parse_key_value(msg_body_sep[0]);
                 let what_unit = self.clone().parse_key_value(msg_body_sep[1]);
-                let session_key = self.clone().parse_key_value(msg_body_sep[2]);
+                let session_key = {
+                    if msg_body_sep.len() > 2 {
+                        self.clone().parse_key_value(msg_body_sep[2])
+                    }
+                    else {
+                        None
+                    }
+                };
 
                 // Check whether session was attached and prior initialized
-                if session_key.is_some() {
-                    let session_key = session_key.unwrap();
-                    if session_key.name == "session_id" {
-                        if let Some(session_storage) = sessions {
-                            // Extend session live time after call this command (by emulate KeepAlive command manually)
-                            CommandTypes::KeepAlive.parse_cmd(msg_body, Some(session_storage));
+                let src_action = |session_raw_content: &str| {
+                    if what_key_val.is_some() && what_unit.is_some() {
+                        let what_key_val = what_key_val.unwrap();
+                        let what_unit = what_unit.unwrap();
 
-                            // Src action
-                            if let Some(session) = session_storage.get(session_key.value) {
-                                // Compute command body
-                                if what_key_val.is_some() && what_unit.is_some() {
-                                    let what_key_val = what_key_val.unwrap();
-                                    let what_unit = what_unit.unwrap();
-    
-                                    // Clousure to check whether user is connected to database and that database name
-                                    let user_conn_t_db = || {
-                                        let session_dat_des = serde_json::from_str::<SessionData>(&session).unwrap();
-                                        match session_dat_des.connected_to_database {
-                                            Some(db_name) => {
-                                                (true, db_name)
-                                            },
-                                            None => (false, String::new())
+                        // Clousure to check whether user is connected to database and that database name
+                        let user_conn_t_db = || {
+                            let session_dat_des = serde_json::from_str::<SessionData>(session_raw_content).unwrap();
+                            match session_dat_des.connected_to_database {
+                                Some(db_name) => {
+                                    (true, db_name)
+                                },
+                                None => (false, String::new())
+                            }
+                        };
+
+                        if what_key_val.name == "what" && what_unit.name == "unit_name" {
+                            match what_key_val.value {
+                                "database_tables" => {
+                                    // User must be connected to specific database prior
+                                    let chckdb = user_conn_t_db();
+                                    if chckdb.0 {
+                                        // Show all database tables
+                                        let path_str = format!("../source/dbs/{db}", db = chckdb.1);
+                                        let path = Path::new(&path_str);
+                                        
+                                        if path.exists() {
+                                            let mut table_names = vec![] as Vec<String>; // only correct tables names without .json extension
+                                            for entry in fs::read_dir(path).unwrap() {
+                                                let entry = entry.unwrap().path();
+
+                                                if entry.is_file() {
+                                                    let et_n_s = entry.file_name().unwrap().to_str().unwrap().split(".").collect::<Vec<_>>();
+
+                                                    if et_n_s.len() > 0 && *et_n_s.last().unwrap() == "json" {
+                                                        table_names.push(et_n_s[..(et_n_s.len() - 1)].join(".")) // add table name without .json extension
+                                                    }
+                                                }
+                                            };
+                                        
+                                            Ok(
+                                                CommandTypes::ShowRes(
+                                                    json!({
+                                                        "tables": table_names
+                                                    })
+                                                    .to_string()
+                                                )    
+                                            )
                                         }
-                                    };
-    
-                                    if what_key_val.name == "what" && what_unit.name == "unit_name" {
-                                        match what_key_val.value {
-                                            "database_tables" => {
-                                                // User must be connected to specific database prior
-                                                let chckdb = user_conn_t_db();
-                                                if chckdb.0 {
-                                                    // Show all database tables
-                                                    let path_str = format!("../source/dbs/{db}", db = chckdb.1);
-                                                    let path = Path::new(&path_str);
-                                                    
-                                                    if path.exists() {
-                                                        let mut table_names = vec![] as Vec<String>; // only correct tables names without .json extension
-                                                        for entry in fs::read_dir(path).unwrap() {
-                                                            let entry = entry.unwrap().path();
-    
-                                                            if entry.is_file() {
-                                                                let et_n_s = entry.file_name().unwrap().to_str().unwrap().split(".").collect::<Vec<_>>();
-    
-                                                                if et_n_s.len() > 0 && *et_n_s.last().unwrap() == "json" {
-                                                                    table_names.push(et_n_s[..(et_n_s.len() - 1)].join(".")) // add table name without .json extension
-                                                                }
-                                                            }
-                                                        };
-                                                    
-                                                        Ok(
-                                                            CommandTypes::ShowRes(
-                                                                json!({
-                                                                    "tables": table_names
-                                                                })
-                                                                .to_string()
-                                                            )    
-                                                        )
-                                                    }
-                                                    else {
-                                                        Err(ErrorResponseKinds::CouldntPerformQuery("Entered database doesn't exists".to_string()))
-                                                    }
-                                                }
-                                                else {
-                                                    Err(ErrorResponseKinds::CouldntPerformQuery("To perform that command you must be firstly connected to database from which you'd like to obtain tables".to_string()))
-                                                }
-                                            },
-                                            "table_records" => {
-                                                // User must be connected to specific database prior
-                                                let chckdb = user_conn_t_db();
-                                                if chckdb.0 {
-                                                    // Show table (with columns including their names, datatypes and constraint and also table all records)
-                                                    let path_str = format!("../source/dbs/{db}/{tb}.json", db = chckdb.1, tb = what_unit.value);
-                                                    let path = Path::new(&path_str);
-                                                    
-                                                    if path.exists() {
-                                                        let table = fs::read_to_string(path).unwrap();
-    
-                                                        if table.len() > 0 {
-                                                            Ok(
-                                                                CommandTypes::ShowRes(
-                                                                    json!({
-                                                                        "table": table
-                                                                    })
-                                                                    .to_string()
-                                                                )
-                                                            )
-                                                        }
-                                                        else {
-                                                            Err(ErrorResponseKinds::CouldntPerformQuery("Table is empty file!".to_string()))
-                                                        }
-                                                    }
-                                                    else {
-                                                        Err(ErrorResponseKinds::CouldntPerformQuery("Entered table name doesn't exists in database to which you're connected".to_string()))
-                                                    }
-                                                }
-                                                else {
-                                                    Err(ErrorResponseKinds::CouldntPerformQuery("To perform that command you must be firstly connected to database from which you'd like to obtain table data".to_string()))
-                                                }
-                                            },
-                                            "databases" => {
-                                                let path_str = format!("../source/dbs");
-                                                let path = Path::new(&path_str);
-                
-                                                if path.exists() {
-                                                    let mut databases_names: Vec<String> = vec![];
-                                                    for entry in fs::read_dir(path).unwrap() {
-                                                        let entry = entry.unwrap().path();
-                                                        if entry.is_dir() {
-                                                            databases_names.push(entry.file_name().unwrap().to_str().unwrap().to_string())
-                                                        }
-                                                    };
-                
-                                                    Ok(
-                                                        CommandTypes::ShowRes(
-                                                            json!({
-                                                                "databases": databases_names
-                                                            })
-                                                            .to_string()
-                                                        )
-                                                    )
-                                                }
-                                                else {
-                                                    Err(ErrorResponseKinds::UnexpectedReason)
-                                                }
-                                            },
-                                            _ => {
-                                                Err(ErrorResponseKinds::IncorrectRequest)
-                                            }
+                                        else {
+                                            Err(ErrorResponseKinds::CouldntPerformQuery("Entered database doesn't exists".to_string()))
                                         }
                                     }
                                     else {
-                                        Err(ErrorResponseKinds::IncorrectRequest)
+                                        Err(ErrorResponseKinds::CouldntPerformQuery("To perform that command you must be firstly connected to database from which you'd like to obtain tables".to_string()))
                                     }
-                                }
-                                else {
+                                },
+                                "table_records" => {
+                                    // User must be connected to specific database prior
+                                    let chckdb = user_conn_t_db();
+                                    if chckdb.0 {
+                                        // Show table (with columns including their names, datatypes and constraint and also table all records)
+                                        let path_str = format!("../source/dbs/{db}/{tb}.json", db = chckdb.1, tb = what_unit.value);
+                                        let path = Path::new(&path_str);
+                                        
+                                        if path.exists() {
+                                            let table = fs::read_to_string(path).unwrap();
+
+                                            if table.len() > 0 {
+                                                Ok(
+                                                    CommandTypes::ShowRes(
+                                                        json!({
+                                                            "table": table
+                                                        })
+                                                        .to_string()
+                                                    )
+                                                )
+                                            }
+                                            else {
+                                                Err(ErrorResponseKinds::CouldntPerformQuery("Table is empty file!".to_string()))
+                                            }
+                                        }
+                                        else {
+                                            Err(ErrorResponseKinds::CouldntPerformQuery("Entered table name doesn't exists in database to which you're connected".to_string()))
+                                        }
+                                    }
+                                    else {
+                                        Err(ErrorResponseKinds::CouldntPerformQuery("To perform that command you must be firstly connected to database from which you'd like to obtain table data".to_string()))
+                                    }
+                                },
+                                "databases" => {
+                                    let path_str = format!("../source/dbs");
+                                    let path = Path::new(&path_str);
+    
+                                    if path.exists() {
+                                        let mut databases_names: Vec<String> = vec![];
+                                        for entry in fs::read_dir(path).unwrap() {
+                                            let entry = entry.unwrap().path();
+                                            if entry.is_dir() {
+                                                databases_names.push(entry.file_name().unwrap().to_str().unwrap().to_string())
+                                            }
+                                        };
+    
+                                        Ok(
+                                            CommandTypes::ShowRes(
+                                                json!({
+                                                    "databases": databases_names
+                                                })
+                                                .to_string()
+                                            )
+                                        )
+                                    }
+                                    else {
+                                        Err(ErrorResponseKinds::UnexpectedReason)
+                                    }
+                                },
+                                _ => {
                                     Err(ErrorResponseKinds::IncorrectRequest)
                                 }
                             }
-                            else {
-                                Err(ErrorResponseKinds::GivenSessionDoesntExists)
-                            }
                         }
                         else {
-                            Err(ErrorResponseKinds::UnexpectedReason)
+                            Err(ErrorResponseKinds::IncorrectRequest)
                         }
                     }
                     else {
                         Err(ErrorResponseKinds::IncorrectRequest)
                     }
+                };
+
+                // Specific bucket for specific communication
+                if !connection_encrypted {
+                    // when connection isn't encrypted
+                    if session_key.is_some() {
+                        let session_key = session_key.unwrap();
+                        if session_key.name == "session_id" {
+                            if let Some(session_storage) = sessions {
+                                // Extend session live time after call this command (by emulate KeepAlive command manually)
+                                CommandTypes::KeepAlive.parse_cmd(msg_body, Some(session_storage), connection_encrypted, None);
+    
+                                // Src action
+                                if let Some(session) = session_storage.get(session_key.value) {
+                                    // Compute command body
+                                    src_action(&session)
+                                }
+                                else {
+                                    Err(ErrorResponseKinds::GivenSessionDoesntExists)
+                                }
+                            }
+                            else {
+                                Err(ErrorResponseKinds::UnexpectedReason)
+                            }
+                        }
+                        else {
+                            Err(ErrorResponseKinds::IncorrectRequest)
+                        }
+                    }
+                    else {
+                        Err(ErrorResponseKinds::IncorrectRequest)
+                    } 
                 }
                 else {
-                    Err(ErrorResponseKinds::IncorrectRequest)
-                }  
+                    // when connection is encrypted
+                    src_action(additional_data.unwrap())
+                }
             }
             else {
                 Err(ErrorResponseKinds::IncorrectRequest)
             }
         }
         else if matches!(self, Self::DatabaseConnect) { // connect user with specific database name // user must be singin with database prior
-            // TODO: 
             let msb_sp = msg_body.split(" 1-1 ").collect::<Vec<_>>();
-            if msb_sp.len() == 2 {
+            if msb_sp.len() > 0 {
                 let db_name = self.clone().parse_key_value(msb_sp[0]);
-                let session_id = self.clone().parse_key_value(msb_sp[1]);
-                if db_name.is_some() && session_id.is_some() {
+                let session_id = {
+                    if msb_sp.len() > 1 && !connection_encrypted {
+                        self.clone().parse_key_value(msb_sp[1])
+                    }
+                    else {
+                        None
+                    }
+                };
+                
+                if db_name.is_some() && connection_encrypted {
+                    // For not encrypted connection
                     let db_name = db_name.unwrap();
                     let session_id = session_id.unwrap();
                     // Check de-parsed keys names correcteness
@@ -562,13 +596,25 @@ impl CommandTypes {
                         // Check whether session exists
                         if let Some(_) = sessions.as_ref().unwrap().get(session_id.value) {
                             // Extend session live time after call this command (by emulate KeepAlive command manually)
-                            CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions.unwrap()));
+                            CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions.unwrap()), connection_encrypted, None);
 
                             Ok(CommandTypes::DatabaseConnectRes(db_name.value.to_string(), Some(session_id.value.to_string())))
                         }
                         else {
                             Err(ErrorResponseKinds::GivenSessionDoesntExists)
                         }
+                    }
+                    else {
+                        Err(ErrorResponseKinds::IncorrectRequest)
+                    }
+                }
+                else if db_name.is_some() && !connection_encrypted {
+                    let db_name = db_name.unwrap();
+                    if db_name.name == "database_name" {
+                        // Extend session live time after call this command (by emulate KeepAlive command manually)
+                        CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions.unwrap()), connection_encrypted, None);
+
+                        Ok(CommandTypes::DatabaseConnectRes(db_name.value.to_string(), None))
                     }
                     else {
                         Err(ErrorResponseKinds::IncorrectRequest)
@@ -892,16 +938,26 @@ fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>
             else {
                 None
             };
+            // It will say whether communication is encrypted
+        let communication_is_encrypted_ind = session_id.as_ref().map_or_else(|| false, |sid| {
+            if let Some(sessions) = &sessions {
+                if sessions.contains_key(sid) {
+                    return serde_json::from_str::<SessionData>(sessions.get(sid).unwrap()).unwrap().encryption.is_some();
+                }
+            };
+            
+            false
+        });
             // mes type
         let message_type = message_semi_spli[0].to_lowercase();
         let message_type = message_type.as_str();
-            // mes body // When encryption was established decrypt it here
+            // mes body // When encryption was established decrypt it (message body) here
         let message_body = {
-            let msb = match session_id {
-                Some(ref sid) => { // To perform decryption message must be in form specific for encryption
+            let msb = match session_id.as_ref() {
+                Some(sid) => { // To perform decryption message must be in form specific for encryption
                     // Try to obtain data to decrypt mes body and decrypt it after
-                    if let Some(ref sessions) = sessions { // sessions must be attached to function invoke
-                        if let Some(ses_dat) = sessions.get(sid) {
+                    if let Some(sessions) = &sessions { // sessions must be attached to function invoke
+                        if let Some(ses_dat) = sessions.get(&sid.clone()) {
                             let ses_dat = serde_json::from_str::<SessionData>(ses_dat).unwrap();
                             if let Some(enc) = ses_dat.encryption {
                                 let nonce = ConnectionCodec::decode_encrypted_message(enc.nonce).unwrap();
@@ -932,26 +988,25 @@ fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>
             // Convert to &str type
             &msb.clone()[..]
         };
-        println!("mes body: {}", message_body);
 
         // Handle command
         if message_type == "command" { // Execute command into db here
-            (session_id, CommandTypes::Command.parse_cmd(message_body, sessions))
+            (session_id, CommandTypes::Command.parse_cmd(message_body, sessions, communication_is_encrypted_ind, None))
         }
         else if message_type == "initializeencryption" {
             (session_id, Ok(CommandTypes::InitializeEncryptionRes)) // return directly without any processing because it isn't required
         }
         else if message_type == "register" { // login user into database and save his session
-            (session_id, CommandTypes::Register.parse_cmd(message_body, None)) // When Ok(_) is returned: CommandTypes::RegisterRes(LoginCommandData { login: String::new("login datas"), password: String::new("password datas") })
+            (session_id, CommandTypes::Register.parse_cmd(message_body, None, communication_is_encrypted_ind, None)) // When Ok(_) is returned: CommandTypes::RegisterRes(LoginCommandData { login: String::new("login datas"), password: String::new("password datas") })
         }
         else if message_type == "keep-alive" { // keep user session saved when
-            (session_id, CommandTypes::KeepAlive.parse_cmd(message_body, sessions)) // Process message body and return
+            (session_id, CommandTypes::KeepAlive.parse_cmd(message_body, sessions, communication_is_encrypted_ind, None)) // Process message body and return
         }
         else if message_type == "show" { // display tables list on database or specific table content
-            (session_id, CommandTypes::Show.parse_cmd(message_body, sessions))
+            (session_id.clone(), CommandTypes::Show.parse_cmd(message_body, sessions, communication_is_encrypted_ind, session_id.as_ref()))
         }
         else if message_type == "databaseconnect" { // connect user with specific database name
-            (session_id, CommandTypes::DatabaseConnect.parse_cmd(message_body, sessions))
+            (session_id, CommandTypes::DatabaseConnect.parse_cmd(message_body, sessions, communication_is_encrypted_ind, None))
         }
         else { // when unsuported message was sended
             (session_id, Err(ErrorResponseKinds::IncorrectRequest))
@@ -1113,8 +1168,22 @@ pub async fn handle_tcp() {
                                     }
                                 },
                                 CommandTypes::KeepAliveRes(ses_id, timestamp) => { // command to extend session life (heartbeat system -> so keep-alive)
-                                    let keep_alive_ac = |ses_id| {
-                                        // extend session to new timestamp
+                                    let ses_id = {
+                                        if let Some(ses_id) = ses_id {
+                                            // For not encrypted connection
+                                            ses_id
+                                        }
+                                        else if let Some(ses_id) = pr.0 {
+                                            // For encrypted connection
+                                            ses_id
+                                        }
+                                        else {
+                                            String::new()
+                                        }
+                                    };
+
+                                    if ses_id.len() > 0 {
+                                        // Session id len can't be empty
                                         //...Parse extended session timestamp to other not changed session data
                                         let old_session_data = sessions.get(&ses_id).unwrap(); // assumes that in this place session must exists and is able to be extended
                                         let new_sess_data = SessionData {
@@ -1125,11 +1194,14 @@ pub async fn handle_tcp() {
                                         let json_new_sess_data = serde_json::to_string(&new_sess_data).unwrap();
                                             //...Update session
                                         sessions.insert(ses_id.clone(), json_new_sess_data);
-    
+
                                         println!("Session live time has been updated");
                                             // Send response
                                         ResponseTypes::Success(false).handle_response(Some(CommandTypes::KeepAlive), Some(&stream), Some(&mut *sessions), Some(ses_id), None)
-                                    };
+                                    }
+                                    else {
+                                        ResponseTypes::Error(ErrorResponseKinds::IncorrectRequest).handle_response(Some(CommandTypes::KeepAlive), Some(&stream), Some(&mut sessions), Some(ses_id), None)
+                                    }
                                     
                                 },
                                 CommandTypes::CommandRes(query) => {
@@ -1144,27 +1216,45 @@ pub async fn handle_tcp() {
 
                                     ResponseTypes::Success(false).handle_response(Some(CommandTypes::Show), Some(&stream), Some(&mut *sessions), None, Some(result))
                                 },
-                                CommandTypes::DatabaseConnectRes(database_name, session_id) => {
+                                CommandTypes::DatabaseConnectRes(database_name, ses_id) => {
                                     let ps = format!("../source/dbs/{}", database_name);
                                     let path_database = Path::new(&ps);
+                                    let ses_id = {
+                                        if let Some(ses_id) = ses_id {
+                                            // For not encrypted connection
+                                            ses_id
+                                        }
+                                        else if let Some(ses_id) = pr.0 {
+                                            // For encrypted connection
+                                            ses_id
+                                        }
+                                        else {
+                                            String::new()
+                                        }
+                                    };
 
-                                    if path_database.exists() {
-                                        let mut sess_datas = serde_json::from_str::<SessionData>(&sessions.get(&session_id).unwrap()).unwrap();
-                                        
-                                        // Push database name to session
-                                        sess_datas.connected_to_database = Some(database_name);
-                                        
-                                        // Serialize to string updated session data
-                                        let new_sess_content = serde_json::to_string(&sess_datas).unwrap();
-
-                                        // Update session data
-                                        sessions.insert(session_id.to_owned(), new_sess_content).unwrap();
-
-                                        // Send Response
-                                        ResponseTypes::Success(false).handle_response(Some(CommandTypes::DatabaseConnect), Some(&stream), Some(&mut *sessions), Some(session_id), None)
+                                    if ses_id.len() > 0 {
+                                        if path_database.exists() {
+                                            let mut sess_datas = serde_json::from_str::<SessionData>(&sessions.get(&ses_id).unwrap()).unwrap();
+                                            
+                                            // Push database name to session
+                                            sess_datas.connected_to_database = Some(database_name);
+                                            
+                                            // Serialize to string updated session data
+                                            let new_sess_content = serde_json::to_string(&sess_datas).unwrap();
+    
+                                            // Update session data
+                                            sessions.insert(ses_id.to_owned(), new_sess_content).unwrap();
+    
+                                            // Send Response
+                                            ResponseTypes::Success(false).handle_response(Some(CommandTypes::DatabaseConnect), Some(&stream), Some(&mut *sessions), Some(ses_id), None)
+                                        }
+                                        else {
+                                            ResponseTypes::Error(ErrorResponseKinds::CouldntPerformQuery("Entered database doesn't exists".to_string())).handle_response(Some(CommandTypes::DatabaseConnect), Some(&stream), Some(&mut *sessions), Some(ses_id), None)
+                                        }
                                     }
                                     else {
-                                        ResponseTypes::Error(ErrorResponseKinds::CouldntPerformQuery("Entered database doesn't exists".to_string())).handle_response(Some(CommandTypes::DatabaseConnect), Some(&stream), Some(&mut *sessions), Some(session_id), None)
+                                        ResponseTypes::Error(ErrorResponseKinds::IncorrectRequest).handle_response(Some(CommandTypes::DatabaseConnect), Some(&stream), Some(&mut sessions), Some(ses_id), None)
                                     }
                                 },
                                 _ => () // other types aren't results
