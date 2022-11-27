@@ -2,23 +2,15 @@
 1. AES Secret key is generated for each specific user during initialization of connection,
 2. RSA both keys are pre-generated and storing in file "./keys/private.pem" and "./keys/public.pem". If these files isn't presented or user wold like to generate new key pair then he should use specific cli command or do this manually,
 3. In communication is using "hybrid cipher mode" so to encrypt message body is using Secret Key for AES-256-GCM Synchronous Encryption Algorithm, but to send this key to client in order to enable decode message are using RSA keys where private is for server (keep secret for client) and public is sended to client,
-3. Secret Key is unique for each client connection so 2 clients will have got other 2 keys then another client and so on,
-4. RSA public key is sended to user but private is keept on dbs,
-5. RSA is used to send to user Secret Key,
-6. First communication message (durning which is send public key to client) is not encrypted but "secret key" and "nonce" which are inside it are, using RSA (this is performed durning "Register" command). After this message client will having got secret key,
-7. For next messages sended from client and from dbs Secret key is used to encrypt message body but "Nonce" which should be unique for each message are always sended beeing encrypted by RSA and attached to message in appropriate form
-8. Nonce is always generated and re-generated on dbs,
-9. Nonce is regenerated for each new message to allow best security and integrity,
-10. Secret Key and RSA keys are not re-generated for whole communication
-11. Encrypted message and data to decrypt message should be sended from/to dbs as HEX bytes separated using whitespace. This should look such as: A0 B3 E1
-12. Encrypted key: AES Secret and Nonce should be also in above form but sepparated from message body using schema: KeysAndNonce;Message-Body 
-    * format is same for both: client requests and server responses,
-    * this allow to easy read after parsing and re-encoding
-13. RSA Public key is sended as: PEM format after attach to appropriate key,    
-    Under KeysAndNonce are:
-        * aes=AES_KEY_HEX - aes secret key in HEX format (attached to response by dbs only for "Register" command)
-        * nonce=NONCE_HEX - generated for each message for client and is in HEX format (after that it is stored on db to wait for next request). Client should recive and attach to his new request nounce recived in previous request (in same connection span). After recive new request server will check that nonce is same as previous generated (not applicable to "Register" command because it initialize connection) and after success accept request and generate new for next response and so on
-    Keys from KeysAndNonce are separated using classic key-value (between key and value) and keys (between keys) separators
-    KeysAndNonce and Message-Body are seperated using semicolon ";"
-    KeysAndNonce and Message-Body are sended to/from dbs as HEX characters. Characters on each fragment are separated using whitespace " ". Fragments are still separated using "semicolon" so ";", 
-(First connection can be pottentially sniffed what can lead to violate security)
+4. Secret Key is unique for each client connection so 2 clients will have got other 2 keys then another client and so on,
+5. RSA public key is sended to user but private is keept on dbs,
+6. RSA is used to send to user Secret Key, Nonce and Session Id,
+7. To establish encrypted connection user must first send to dbs "InitializeEncryption" command,
+8. After reciving these command dbs create session with data required to encrypt/decrypt payload and send these data back to server,
+9. In encryption all messages are encrypted using AES secret key and Nonce,
+10. User doesn't have to send in next messages aes key and all recived data from "InitializeEncryption" required to encrypt communication command except "session id",
+11. Secret Key and RSA keys are not re-generated for whole communication
+12. All data sending from dbs and recived by client are encoded to hex,
+13. Client durning recived response from "InitializeEncryption" command will get rsa encrypted payload under which are: OK;aes|x=x|aes_key_hex 1-1 nonce|x=x|nonce_hex 1-1 session_id|x=x|session_id_as_uuidv4 (to obtain that message must be firstly decrypted from RSA ciphertext)
+14. DBS and client after recived will cache such data: aes_key and nonce and won't attach them to next response,
+15. Session id always can't be encrypted whereby client request payload for encryption should looks like: CommandType+message_content(Both encrypted);session_id

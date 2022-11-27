@@ -85,7 +85,7 @@ pub mod tests {
     #[path = "../login-system.rs"]
     mod login_module;
 
-    use std::{ net::TcpStream, io::{Write, Read, BufReader, BufRead} };
+    use std::{ net::TcpStream, io::{Write, Read, BufReader, BufRead}, borrow::Borrow };
     use login_module::authenticate_user;
     use std::str;
     use format as f;
@@ -182,8 +182,20 @@ pub mod tests {
         connection.read(&mut buf).expect("Couldn't read server response");
 
         let resp_str = String::from_utf8(buf.to_vec()).expect("Coulnd't create utf-8 string with HEX codes string").replace("\0", ""); // + replace null character for elminate error durning decoding code to utf-8 cuz: in HEX letters range (0-F) control character \0 is absent
-        let resp_fr_hex_bytes = ConnectionCodec::decode_encrypted_message(resp_str).unwrap(); // Get from hex codes bytecodes of cipher letter represented by 2 character hex code
-        println!("{:?}", resp_fr_hex_bytes);
+        // let resp_fr_hex_bytes = ConnectionCodec::decode_encrypted_message(resp_str).unwrap(); // Get from hex codes bytecodes of cipher letter represented by 2 character hex code
+        let decode_from_rsa = CommmunicationEncryption::rsa_decrypt_message(resp_str).expect("Couldn't decrypt message from rsa!");
+        println!("{}", decode_from_rsa);
+
+        // Stage 1: obtain response message and encrypted content in hex formats
+        /* let st1_decode = String::from_utf8(resp_fr_hex_bytes).expect("Couldn't perform stage 1 decoding");
+        let fragments = st1_decode.split(";").collect::<Vec<_>>();
+        let message_type = fragments[0];
+        let data_to_dec_mes = fragments[1];
+        let message_to_dec = fragments[2];
+
+        // Stage 2: obtain data ti decrypt message content
+        let data_to_dec_mes = CommmunicationEncryption::rsa_decrypt_message(data_to_dec_mes.to_string()).expect("Couldn't decrypt message required to obtain data to decrypt message content using symmetric encryption!");
+        println!("{}", data_to_dec_mes); */
     }
 
     #[test]

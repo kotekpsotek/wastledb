@@ -1,4 +1,4 @@
-use std::{io::{Write, Read}, fmt::format, vec};
+use std::{io::{Write, Read}, vec};
 #[path ="../login-system.rs"]
 mod login_system;
 #[path ="../management"]
@@ -40,7 +40,7 @@ impl ResponseTypes {
      * Function to handle TCP server response by write message response bytes to TcpStream represented by "stream" param. In case when response can't be send error message about that will be printed in cli
      * When user would like have encrypted ongoing message it is performed by this function
     **/
-    fn handle_response(&self, from_command: Option<CommandTypes>, stream: Option<TcpStream>, sessions: Option<&mut HashMap<String, String>>, session_id: Option<String>, response_content: Option<String>) {
+    fn handle_response(&self, from_command: Option<CommandTypes>, stream: Option<&TcpStream>, sessions: Option<&mut HashMap<String, String>>, session_id: Option<String>, response_content: Option<String>) {
         /// When user would like to encrypt message then encrypt or return message in raw format (that fact is inferred from SessionData struct by this function)
         fn response_message_generator(command_type: Option<CommandTypes>, sessions: Option<&mut HashMap<String, String>>, session_id: Option<String>, message: String) -> String {
             if sessions.is_some() && session_id.is_some() {
@@ -58,34 +58,17 @@ impl ResponseTypes {
                         }
                         else {
                             // Encrypt normal message using previous generated encryption datas
-                            /* let enc_message = CommmunicationEncryption::aes_256_gcm_encrypt(
+                            let enc_message = CommmunicationEncryption::aes_256_gcm_encrypt(
                                 &encryption.aes_gcm_key, 
-                                CommmunicationEncryption::from_hex_to_vec_bytes(&encryption.nonce),
+                                ConnectionCodec::decode_encrypted_message(encryption.nonce.clone()).expect("Couldn't decode nonce string to vec with bytes"),
                                 message.as_bytes()
                             );
-                            let enc_message_hex = CommmunicationEncryption::convert_vec_bytes_to_hex(enc_message);
+                            let enc_message = ConnectionCodec::code_encrypted_message(enc_message); // code encrypted using AES message
 
-                            // Prepare encrypted message format
-                                // Plaintext info required to decrypt message body
-                            let info_to_decrypt = {
-                                let mut inf = format!("nonce|x=x|{nonce}", nonce = encryption.nonce);
-                                    // .. Aes key is attached only to register command and when command hasn't been entered. After when response has been achived by client Secret key is cached by client for whole ongoing connection 
-                                        // When command hasn't been entered that means that use can hasn't got cached AES Secret key (in situation when he didn't achived "Register" command response)
-                                if command_type.is_none() || (command_type.is_some() && command_type.unwrap() == CommandTypes::Register) {
-                                    let aes_key = format!(" 1-1 aes|x=x|{aes_key_t}", aes_key_t = encryption.aes_gcm_key);
-                                    inf.push_str(&aes_key);
-                                };
-                                inf
-                            };
-                                // Ciphertext with information to decrypt message body / When Err(()) from encryption function then return empty string which will be send to client
-                            let key_nonce_encrypted = CommmunicationEncryption::rsa_encrypt_message(info_to_decrypt)
-                                .map_or_else(|_| String::new(), |enc_mes| enc_mes);
-                            
-                            // Return formed message
-                            format!("{key_and_nonce};{message_body}", key_and_nonce = key_nonce_encrypted, message_body = enc_message_hex) */
-                            String::new()
+                            // Return encrypted message under HEX strings under which are not valid utf-8 characters
+                            enc_message
                         }
-                    } 
+                    }
                     else {
                         // Send message without any encryption but encoded as hex
                         ConnectionCodec::code_hex(message)
@@ -197,8 +180,7 @@ enum ErrorResponseKinds {
 struct LoginCommandData { // setup connection data
     login: String,
     password: String,
-    connected_to_db: Option<String>,
-    use_rsa: bool
+    connected_to_db: Option<String>
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -253,24 +235,6 @@ impl CommandTypes {
                         }
                         else {
                             None
-                        },
-                        use_rsa: if msg_body_sep.len() >= 3 { // whether communication between database and client should be encrypted using "RSA" algorithm
-                            let mut whether_use = false;
-                            for val_option in &msg_body_sep[1..] { // order of optional params shouldn't have any matter
-                                let key_val = self.clone().parse_key_value(val_option);
-                                if let Some(key_val) = key_val {
-                                    if key_val.name == "rsa" { // when "rsa" option has been found
-                                        if let Ok(val) = key_val.value.parse::<bool>() { // value presented for "rsa" should be boolean data-type
-                                            whether_use = val
-                                        };
-                                        break;
-                                    }
-                                }
-                            }
-                            whether_use
-                        }
-                        else {
-                            false
                         }
                     };
 
@@ -799,7 +763,7 @@ impl CommmunicationEncryption {
 
     /// Decrypt message using RSA public key (message to decrypt must be encrypted using RSA private key from same pair otherwise Err(() will be returned))
     /// Return: when Ok(_) = decrypted message in valid utf-8 string, Err(_) - "()" = "tuple type" without elements inside 
-    fn rsa_decrypt_message(msg_hex: String) -> Result<String, ()> {
+    pub fn rsa_decrypt_message(msg_hex: String) -> Result<String, ()> {
         let public_key = Self::get_rsa_key(GetRsaKey::Private)?.0
             .map_or_else(|| Err(()), |key| Ok(key))?;
         let encrypted_mess_bytes = ConnectionCodec::decode_encrypted_message(msg_hex).expect("Couldn't convert message from hex string to bytes vec");
@@ -904,40 +868,49 @@ fn get_timestamp() -> u128 {
 
 // "Call as 3"
 // Recoginize commands and parse it then return Ok() when both steps was berformed correctly or return Err() when these both steps couldn't be performed. Error is returned as ErrorResponseKinds enum which can be handled directly by put it into enum "ResponseTypes" and call to method ".handle_response(tcp_stream)"
-fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>) -> Result<CommandTypes, ErrorResponseKinds> {
-    let message_semi_spli = c_req.split(";").collect::<Vec<&str>>(); // split message using semicolon
+fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>) -> (Option<String>, Result<CommandTypes, ErrorResponseKinds>) {
+    let message_semi_spli = (c_req).split(";").collect::<Vec<&str>>(); // split message using semicolon
     if message_semi_spli.len() > 1 { // must be at least 2 pieces: "Message Type" and second in LTF order "Message Body"
             // mes type
         let message_type = message_semi_spli[0].to_lowercase();
         let message_type = message_type.as_str();
             // mes body
         let message_body = message_semi_spli[1];
-       
+            // Session id exists only in this form when user established encrypted connection
+        let session_id = 
+            if message_semi_spli.len() == 3 {
+                Some(message_semi_spli[2].to_string())
+            }
+            else {
+                None
+            };
+
+
         // Handle command
         if message_type == "command" { // Execute command into db here
-            CommandTypes::Command.parse_cmd(message_body, sessions)
+            (session_id, CommandTypes::Command.parse_cmd(message_body, sessions))
         }
         else if message_type == "initializeencryption" {
-            Ok(CommandTypes::InitializeEncryptionRes) // return directly without any processing because it isn't required
+            (session_id, Ok(CommandTypes::InitializeEncryptionRes)) // return directly without any processing because it isn't required
         }
         else if message_type == "register" { // login user into database and save his session
-            CommandTypes::Register.parse_cmd(message_body, None) // When Ok(_) is returned: CommandTypes::RegisterRes(LoginCommandData { login: String::new("login datas"), password: String::new("password datas") })
+            (session_id, CommandTypes::Register.parse_cmd(message_body, None)) // When Ok(_) is returned: CommandTypes::RegisterRes(LoginCommandData { login: String::new("login datas"), password: String::new("password datas") })
         }
         else if message_type == "keep-alive" { // keep user session saved when
-            CommandTypes::KeepAlive.parse_cmd(message_body, sessions) // Process message body and return
+            (session_id, CommandTypes::KeepAlive.parse_cmd(message_body, sessions)) // Process message body and return
         }
         else if message_type == "show" { // display tables list on database or specific table content
-            CommandTypes::Show.parse_cmd(message_body, sessions)
+            (session_id, CommandTypes::Show.parse_cmd(message_body, sessions))
         }
         else if message_type == "databaseconnect" { // connect user with specific database name
-            CommandTypes::DatabaseConnect.parse_cmd(message_body, sessions)
+            (session_id, CommandTypes::DatabaseConnect.parse_cmd(message_body, sessions))
         }
         else { // when unsuported message was sended
-            Err(ErrorResponseKinds::IncorrectRequest)
+            (session_id, Err(ErrorResponseKinds::IncorrectRequest))
         }
     }
     else { // when after separation message by its parts exists less or equal to 1 part in Vector
-        Err(ErrorResponseKinds::IncorrectRequest)
+        (None, Err(ErrorResponseKinds::IncorrectRequest))
     }
 }
 
@@ -1008,7 +981,21 @@ pub async fn handle_tcp() {
                     let mut sessions = sessions.lock().unwrap();
                     
                     /*  */
-                    match process_request(c_req.clone(), Some(&mut sessions)) {
+                    let sc = sessions.clone(); // sessions 
+                    let pr = process_request(c_req.clone(), Some(&mut sessions));
+                    // Check whether recived session id is correct when encrypted connection was established
+                    let check_sid_u_enc = |sessions: &HashMap<String, String>| {
+                        if let Some(sid) = &pr.0 {
+                            if sessions.contains_key(sid) {
+                                return serde_json::from_str::<SessionData>(sessions.get(sid).unwrap()).unwrap().encryption.is_some()
+                            };
+                        };
+
+                        false
+                    };
+
+                    // Handling commands
+                    match pr.1 {
                         Ok(command_type) => {
                             match command_type {
                                 // Create encryption between server and client
@@ -1032,56 +1019,49 @@ pub async fn handle_tcp() {
 
                                         // Send response to client // response_cnt will be encrypted using RSA private key
                                     let response_cnt = format!("aes|x=x|{aesk} 1-1 nonce|x=x|{nonce} 1-1 session_id|x=x|{sid}", aesk = aes_key, nonce = aes_nonce_string, sid = session_id);
-                                    ResponseTypes::Success(true).handle_response(Some(CommandTypes::InitializeEncryptionRes), Some(stream), Some(&mut *sessions), Some(session_id), Some(response_cnt))
+                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::InitializeEncryptionRes), Some(&stream), Some(&mut *sessions), Some(session_id), Some(response_cnt))
                                 },
                                 // Save user session
-                                CommandTypes::RegisterRes(LoginCommandData { login, password, connected_to_db, use_rsa }) => {
-                                    // ...Check login corecteness
-                                    let s = Some(stream);
-                                    if authenticate_user(login, password) {
-                                        fn gen_uuid(sessions: &HashMap<String, String>) -> String {
-                                            let uuid_v = Uuid::new_v4().to_string();
-                                            if sessions.contains_key(&uuid_v) {
-                                               return gen_uuid(sessions);
-                                            };
-                                            uuid_v
+                                CommandTypes::RegisterRes(LoginCommandData { login, password, connected_to_db }) => {
+                                    // update session data and send response
+                                    let mut update_session_and_res = |sid: &String, sdata| match serde_json::to_string::<SessionData>(sdata) {
+                                        Ok(ses_val) => {
+                                            // Add session value to sessions list
+                                            sessions.insert(sid.clone(), ses_val);
+
+                                            // Send response
+                                            ResponseTypes::Success(true).handle_response(Some(CommandTypes::Register), Some(&stream), Some(&mut *sessions), Some(sid.clone()), None)
+                                        },
+                                        _ => ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response( Some(CommandTypes::Register), Some(&stream), None, None, None)
+                                    };
+
+                                    if pr.0.is_some() && check_sid_u_enc(&sc) {
+                                        // When encrypted session has been established
+                                        if authenticate_user(login, password) {
+                                            // update session data
+                                            let sd = sc.get(pr.0.as_ref().unwrap()).unwrap();
+                                            let mut sd = serde_json::from_str::<SessionData>(sd).unwrap();
+                                            sd.connected_to_database = connected_to_db;
+                                            update_session_and_res(&pr.0.unwrap(), &sd)
                                         }
-                                        
-                                        // Save session into sessios list
-                                            //... Generate uuid_v4
-                                        let uuid_gen = gen_uuid(&sessions);
-                                            //... Compose session data in form of struct
-                                        let session_data = SessionData {
-                                            timestamp: get_timestamp(),
-                                            connected_to_database: connected_to_db,
-                                            encryption: {
-                                                if use_rsa {
-                                                    Some(CommmunicationEncryption {
-                                                        nonce: CommmunicationEncryption::gen_aes_nonce().0,
-                                                        aes_gcm_key: CommmunicationEncryption::gen_aes_key()
-                                                    })
-                                                }
-                                                else {
-                                                    None
-                                                }
-                                            }
-                                        };
-
-                                            //... Serialize session data into JSON, handle result and send appropriate response to what is Result<..> outcome
-                                        match serde_json::to_string(&session_data) {
-                                            Ok(ses_val) => {
-                                                // Add session value to sessions list
-                                                sessions.insert(uuid_gen.clone(), ses_val);
-                                                // println!("{:?}", sessions); // Test: print all sessions in list after add new session
-
-                                                // Send response
-                                                ResponseTypes::Success(true).handle_response(Some(CommandTypes::Register), s, Some(&mut *sessions), Some(uuid_gen), None)
-                                            },
-                                            _ => ResponseTypes::Error(ErrorResponseKinds::UnexpectedReason).handle_response( Some(CommandTypes::Register), s, None, None, None)
-                                        };
+                                        else {
+                                            ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin).handle_response(Some(CommandTypes::Register), Some(&stream), None, None, None)
+                                        }
                                     }
                                     else {
-                                        ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin).handle_response(Some(CommandTypes::Register), s, None, None, None)
+                                        // When encrypted session wasn't established
+                                        if authenticate_user(login, password) {
+                                            let sid = uuid::Uuid::new_v4().to_string();
+                                            let session_data = SessionData {
+                                                timestamp: get_timestamp(),
+                                                connected_to_database: connected_to_db,
+                                                encryption: None
+                                            };
+                                            update_session_and_res(&sid, &session_data)
+                                        }
+                                        else {
+                                            ResponseTypes::Error(ErrorResponseKinds::IncorrectLogin).handle_response(Some(CommandTypes::Register), Some(&stream), None, None, None)
+                                        }
                                     }
                                 },
                                 CommandTypes::KeepAliveRes(ses_id, timestamp) => { // command to extend session life (heartbeat system -> so keep-alive)
@@ -1099,19 +1079,19 @@ pub async fn handle_tcp() {
 
                                     println!("Session live time has been updated");
                                         // Send response
-                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::KeepAlive), Some(stream), Some(&mut *sessions), Some(ses_id), None)
+                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::KeepAlive), Some(&stream), Some(&mut *sessions), Some(ses_id), None)
                                 },
                                 CommandTypes::CommandRes(query) => {
                                     // Furthermore process query by database
                                     println!("Query: {}", query);
 
                                     // Send success response to client
-                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::Command), Some(stream), Some(&mut *sessions), None, Some(query))
+                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::Command), Some(&stream), Some(&mut *sessions), None, Some(query))
                                 },
                                 CommandTypes::ShowRes(result) => {
                                     println!("Show command Result: {}", result);
 
-                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::Show), Some(stream), Some(&mut *sessions), None, Some(result))
+                                    ResponseTypes::Success(false).handle_response(Some(CommandTypes::Show), Some(&stream), Some(&mut *sessions), None, Some(result))
                                 },
                                 CommandTypes::DatabaseConnectRes(database_name, session_id) => {
                                     let ps = format!("../source/dbs/{}", database_name);
@@ -1130,16 +1110,16 @@ pub async fn handle_tcp() {
                                         sessions.insert(session_id.to_owned(), new_sess_content).unwrap();
 
                                         // Send Response
-                                        ResponseTypes::Success(false).handle_response(Some(CommandTypes::DatabaseConnect), Some(stream), Some(&mut *sessions), Some(session_id), None)
+                                        ResponseTypes::Success(false).handle_response(Some(CommandTypes::DatabaseConnect), Some(&stream), Some(&mut *sessions), Some(session_id), None)
                                     }
                                     else {
-                                        ResponseTypes::Error(ErrorResponseKinds::CouldntPerformQuery("Entered database doesn't exists".to_string())).handle_response(Some(CommandTypes::DatabaseConnect), Some(stream), Some(&mut *sessions), Some(session_id), None)
+                                        ResponseTypes::Error(ErrorResponseKinds::CouldntPerformQuery("Entered database doesn't exists".to_string())).handle_response(Some(CommandTypes::DatabaseConnect), Some(&stream), Some(&mut *sessions), Some(session_id), None)
                                     }
                                 },
                                 _ => () // other types aren't results
                             }
                         },
-                        Err(err_kind) => ResponseTypes::Error(err_kind).handle_response(None, Some(stream), None, None, None)
+                        Err(err_kind) => ResponseTypes::Error(err_kind).handle_response(None, Some(&stream), None, None, None)
                     };
                 }
                 Err(_) => {
