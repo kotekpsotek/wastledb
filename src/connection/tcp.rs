@@ -209,7 +209,6 @@ impl CommandTypes {
             if msg_body.len() > 0 {
                 let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
                 if msg_body_sep.len() >= 2 { // isnide login section must be 2 pieces: 1 - login|x=x|logindata 2 - password|x=x|passworddata 3 - connect_auto|x=x|true
-                    
                     let mut keys_required_list = LoginCommandData { 
                         login: String::new(), 
                         password: String::new() ,
@@ -314,20 +313,15 @@ impl CommandTypes {
         else if matches!(self, Self::Command) { // command for execute sql query in database
             let msg_body_sep = msg_body.split(" 1-1 ").collect::<Vec<&str>>();
             if msg_body_sep.len() >= 1 { // isnide login section must be minimum 2 pieces: 1 - sql_query|x=x|sql query which will be executed on db, 2 - ...described inside block, 3 - session_id|x=x|session_id
-                //... session
-                let request_session = self
-                    .clone()
-                    .parse_key_value(msg_body_sep.last().unwrap());
-
-                if let Some(CommandTypeKeyDiff { name, value: session_id }) = request_session {
-                    let sessions = sessions.unwrap(); 
-                    if name == "session_id" && sessions.contains_key(session_id) { // key "session_id" must always be first
-                        //... query
-                        let sql_query_key = self
-                            .clone()
-                            .parse_key_value(msg_body_sep[0]);
-                        // Using when user would like connect to database after create database using 'CREATE DATABASE database_name' SQL query // this option always must be 3 in order and value assigned to it must be "boolean"
-                        let connect_auto = if msg_body_sep.len() >= 3 { // to pass this option must be presented prior 2 keys so: 1. session_id, 2. command (src)  
+                // Action to perform
+                let src_action = |sessions: &mut HashMap<String, String>, session_id: String| {
+                    //... query
+                    let sql_query_key = self
+                        .clone()
+                        .parse_key_value(msg_body_sep[0]);
+                    // Using when user would like connect to database after create database using 'CREATE DATABASE database_name' SQL query // this option always must be 3 in order and value assigned to it must be "boolean"
+                    let connect_auto = 
+                        if msg_body_sep.len() >= 3 { // to pass this option must be presented prior 2 keys so: 1. session_id, 2. command (src)  
                             if let Some(CommandTypeKeyDiff { name, value }) = self.clone().parse_key_value(msg_body_sep[1]) {
                                 if name == "connect_auto" && vec!["true", "false"].contains(&value) {
                                     Some(
@@ -349,29 +343,47 @@ impl CommandTypes {
                             None
                         };
 
-                        // Process SQL query ... only when sql_query_key was correctly parsed prior
-                        if let Some(CommandTypeKeyDiff { name, value }) = sql_query_key {
-                            if name == "sql_query" && value.len() > 0 {
-                                // Extend session live time after call this command (by emulate KeepAlive command manually)
-                                CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions), connection_encrypted, None);
+                    // Process SQL query ... only when sql_query_key was correctly parsed prior
+                    if let Some(CommandTypeKeyDiff { name, value }) = sql_query_key {
+                        if name == "sql_query" && value.len() > 0 {
+                            // Extend session live time after call this command (by emulate KeepAlive command manually)
+                            CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions), connection_encrypted, None);
 
-                                // Process query + return processing result outside this method
-                                let q_processed_r = self::management::main::process_query(value, connect_auto, session_id.into(), sessions);
-                                match q_processed_r {
-                                    Success(desc_opt) => {
-                                        if let Some(desc) = desc_opt {
-                                            return Ok(CommandTypes::CommandRes(desc))
-                                        };
+                            // Process query + return processing result outside this method
+                            let q_processed_r = self::management::main::process_query(value, connect_auto, session_id, sessions);
+                            match q_processed_r {
+                                Success(desc_opt) => {
+                                    if let Some(desc) = desc_opt {
+                                        return Ok(CommandTypes::CommandRes(desc))
+                                    };
 
-                                        // outcome when from processing sql query function has been returned Success(None) (without content description)
-                                        Ok(CommandTypes::CommandRes(format!("Query has been performed")))
-                                    },
-                                    Error(reason) => Err(ErrorResponseKinds::CouldntPerformQuery(reason))
-                                }
+                                    // outcome when from processing sql query function has been returned Success(None) (without content description)
+                                    Ok(CommandTypes::CommandRes(format!("Query has been performed")))
+                                },
+                                Error(reason) => Err(ErrorResponseKinds::CouldntPerformQuery(reason))
                             }
-                            else {
-                                Err(ErrorResponseKinds::IncorrectRequest)
-                            }
+                        }
+                        else {
+                            Err(ErrorResponseKinds::IncorrectRequest)
+                        }
+                    }
+                    else {
+                        Err(ErrorResponseKinds::IncorrectRequest)
+                    }
+                };
+
+                // Perform specific action
+                let sessions = sessions.unwrap();
+                if !connection_encrypted {
+                    // When connection isn't encrypted
+                    //... session
+                    let request_session = self
+                        .clone()
+                        .parse_key_value(msg_body_sep.last().unwrap());
+
+                    if let Some(CommandTypeKeyDiff { name, value: session_id }) = request_session {
+                        if name == "session_id" && sessions.contains_key(session_id) {
+                            src_action(sessions, session_id.to_string())
                         }
                         else {
                             Err(ErrorResponseKinds::IncorrectRequest)
@@ -382,7 +394,13 @@ impl CommandTypes {
                     }
                 }
                 else {
-                    Err(ErrorResponseKinds::IncorrectRequest)
+                    // When connection is encrypted
+                    if let Some(session_id) = additional_data {
+                        src_action(sessions, session_id.into())
+                    }
+                    else {
+                        Err(ErrorResponseKinds::UnexpectedReason)
+                    }
                 }
             }
             else {
@@ -1265,7 +1283,7 @@ pub async fn handle_tcp() {
                 }
                 Err(_) => {
                     /* handle probably error */
-                    println!("Recived response is incorrect!");
+                    println!("Recived request is incorrect!");
                     if let Err(_) = stream.shutdown(std::net::Shutdown::Both) {
                         println!("Couldn't close TCP connection after handled incorrect response!");
                     }
