@@ -272,12 +272,7 @@ impl CommandTypes {
             if !connection_encrypted {
                 // Parse only for not encrypted connection
                 if sessions.contains_key(msg_body) {
-                    let ses_id = if !connection_encrypted {
-                        msg_body.to_string()
-                    }
-                    else {
-                        String::new()
-                    };
+                    let ses_id = msg_body.to_string();
     
                         //...Get session data and parse it from json format
                     let json_session_data = sessions.get(&ses_id).unwrap();
@@ -289,7 +284,7 @@ impl CommandTypes {
     
                         //...Test Whether session expiration can be extended and extend when can be 
                     if (timestamp + inter::MAXIMUM_SESSION_LIVE_TIME_MILS) >= timestamp_new {
-                        let ses_id_res = if connection_encrypted && ses_id.len() == 0 {
+                        let ses_id_res = if ses_id.len() != 0 {
                                 Some(ses_id)
                             }
                             else {
@@ -628,11 +623,12 @@ impl CommandTypes {
                 }
                 else if db_name.is_some() && !connection_encrypted {
                     let db_name = db_name.unwrap();
-                    if db_name.name == "database_name" {
+                    let session_id = session_id.unwrap();
+                    if db_name.name == "database_name" && session_id.name == "session_id" && db_name.value.len() > 0 && session_id.value.len() > 0 {
                         // Extend session live time after call this command (by emulate KeepAlive command manually)
                         CommandTypes::KeepAlive.parse_cmd(msg_body, Some(sessions.unwrap()), connection_encrypted, None);
 
-                        Ok(CommandTypes::DatabaseConnectRes(db_name.value.to_string(), None))
+                        Ok(CommandTypes::DatabaseConnectRes(db_name.value.to_string(), Some(session_id.value.to_string())))
                     }
                     else {
                         Err(ErrorResponseKinds::IncorrectRequest)
@@ -911,8 +907,13 @@ impl ConnectionCodec {
 
         // Iterate over each character presented under HEX code in 2 charcters i.e: 2F (UTF-8 character is: \)
         for splitted_char in splitted {
-            let byte_utf8 = u8::from_str_radix(splitted_char, 16).map_err(|_| ())?; // when error return it directly from loop
-            decoded_bytes.push(byte_utf8);
+            if splitted_char != "\0\0" {
+                let byte_utf8 = u8::from_str_radix(splitted_char, 16).map_err(|_| ())?; // when error return it directly from loop
+                decoded_bytes.push(byte_utf8);
+            }
+            else {
+                break;
+            }
         }
 
         // Return utf-8 string created from HEX by that whole callable unit or Err
@@ -1035,7 +1036,6 @@ fn process_request(c_req: String, sessions: Option<&mut HashMap<String, String>>
     }
 }
 
-// TODO: Add session param and decryption message after decode from hex
 // Call as 2
 // Handle pending request and return request message when it is correct
 // Err -> when: couldn't read request, colund't convert request to utf-8 string, couldn't decode hex codes to utf-8 character
@@ -1185,7 +1185,7 @@ pub async fn handle_tcp() {
                                         }
                                     }
                                 },
-                                CommandTypes::KeepAliveRes(ses_id, timestamp) => { // command to extend session life (heartbeat system -> so keep-alive)
+                                CommandTypes::KeepAliveRes(ses_id, timestamp) => { // command to extend session life (heartbeat system -> so keep-alive)                                
                                     let ses_id = {
                                         if let Some(ses_id) = ses_id {
                                             // For not encrypted connection
