@@ -141,6 +141,7 @@ pub mod tests {
         (sess_id, public_key)
     }
 
+    // TODO: Change TCP command: It require encode sending payload to valid utf-8 (not-encrypted so use for it function: ConnectionCodec::code_hex()) hex before send it to DBS
     #[test]
     fn tcp_tester() {
         let mut stream = TcpStream::connect("0.0.0.0:20050").expect("Couldn't connect with server");
@@ -165,17 +166,21 @@ pub mod tests {
         let registered_response = register_user_by_tcp();
             //... session id in form without \0 (empty) characters
         let sess_id = parse_register_response_body(registered_response).0;
+        println!("{}", sess_id);
         
         // Second call (source)
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
 
             //... Request
-        connection.write(f!("Keep-Alive;{}", sess_id).as_bytes()).unwrap();
+        let command = f!("Keep-Alive;{}", sess_id);
+        let command = ConnectionCodec::code_hex(command);
+        connection.write(command.as_bytes()).unwrap();
 
             //... Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf2).expect("Couldn't read server response");
-        let resp2_str = String::from_utf8(buf2.to_vec()).unwrap();
+        let resp2_str = String::from_utf8(buf2.to_vec()).unwrap(); // Session response is encoded into hex
+        let resp2_str = ConnectionCodec::decode_hex(resp2_str).expect("couldn't decode message");
         println!("{}", resp2_str)
     }
 
@@ -190,8 +195,7 @@ pub mod tests {
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
 
             //... Request 
-        // TODO: Change order: "session_id" must always be last and sql_query value couldn't end with semicolon ";"
-            // Remained options (not used in sended query) (with separators): 1-1 connect_auto|x=x|true
+        // Remained options (not used in sended query) (with separators): 1-1 connect_auto|x=x|true
                 // ... Operation: INSERT INTO    
         // connection.write(f!(r#"Command;sql_query|x=x|INSERT INTO "mycat2" VALUES ('kika', 'female', 5) 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
                 // ... Opeartion: INSERT OVERWRITE TABLE
@@ -211,13 +215,16 @@ pub mod tests {
         // ... Operation: ALTER TABLE // TODO: More spohisticated test for query 'ALTER TABLE .. CHANGE COLUMN ..'
         // connection.write(f!(r#"Command;sql_query|x=x|ALTER TABLE mycat2 CHANGE COLUMN name_test name varchar(2555) 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
             // Command ALTER TABLE couldn't be parsed by sqlparser (always SQL Syntax Error)
-        connection.write(f!("Command;sql_query|x=x|ALTER TABLE t2 ALTER COLUMN c varchar(355) 1-1 session_id|x=x|{}", sess_id).as_bytes()).unwrap();
+        let command = f!("Command;sql_query|x=x|ALTER TABLE t2 ALTER COLUMN c varchar(355) 1-1 session_id|x=x|{}", sess_id);
+        let command = ConnectionCodec::code_hex(command); // data must be in hex format
+        connection.write(command.as_bytes()).unwrap();
             //... Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf2).expect("Couldn't read server response");
         
                 // ... parse response buf to String
         let resp2_str = String::from_utf8(buf2.to_vec()).unwrap();
+        let resp2_str = ConnectionCodec::decode_hex(resp2_str).expect("couldn't decode message");
         println!("{}", resp2_str)
     }
 
@@ -233,18 +240,21 @@ pub mod tests {
 
         // Request
             // Show dbs databases
-        connection.write(f!(r#"Show;what|x=x|databases 1-1 unit_name|x=x|none 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
+        let command = f!(r#"Show;what|x=x|databases 1-1 unit_name|x=x|none 1-1 session_id|x=x|{}"#, sess_id);
             // Show database tables
-        // connection.write(f!(r#"Show;what|x=x|database_tables 1-1 unit_name|x=x|none 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
+        // let command = f!(r#"Show;what|x=x|database_tables 1-1 unit_name|x=x|none 1-1 session_id|x=x|{}"#, sess_id);
             // Show specific table data
-        // connection.write(f!(r#"Show;what|x=x|table_records 1-1 unit_name|x=x|mycat2 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
-        
+        // let command = f!(r#"Show;what|x=x|table_records 1-1 unit_name|x=x|mycat2 1-1 session_id|x=x|{}"#, sess_id);
+        let command = ConnectionCodec::code_hex(command);
+        connection.write(command.as_bytes()).unwrap();
 
         // Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf2).expect("Couldn't read server response");
             // Parse response buf to String
         let resp2_str = String::from_utf8(buf2.to_vec()).unwrap();
+        let resp2_str = ConnectionCodec::decode_hex(resp2_str).expect("couldn't decode message");
+        
         println!("{}", resp2_str)
     }
 
@@ -259,13 +269,16 @@ pub mod tests {
         let mut connection = TcpStream::connect("127.0.0.1:20050").expect("Couldn't connect with server");
 
         // Request
-        connection.write(f!(r#"DatabaseConnect;database_name|x=x|database_name 1-1 session_id|x=x|{}"#, sess_id).as_bytes()).unwrap();
+        let command = f!(r#"DatabaseConnect;database_name|x=x|test 1-1 session_id|x=x|{}"#, sess_id);
+        let command = ConnectionCodec::code_hex(command);
+        connection.write(command.as_bytes()).unwrap();
 
         // Response
         let mut buf2 = [0; MAXIMUM_RESPONSE_SIZE_BYTES];
         connection.read(&mut buf2).expect("Couldn't read server response");
             // Parse response buf to String
         let resp2_str = String::from_utf8(buf2.to_vec()).unwrap();
+        let resp2_str = ConnectionCodec::decode_hex(resp2_str).expect("couldn't decode message");
         println!("{}", resp2_str)
     }
 
