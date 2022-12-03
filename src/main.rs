@@ -1,9 +1,10 @@
 mod connection {
     pub mod tcp;
 }
-mod tui;
 #[path ="./login-system.rs"]
 mod login_system;
+#[path ="./additions/create_stuff.rs"]
+mod create_stuff;
 mod inter;
 use tokio;
 
@@ -15,7 +16,10 @@ mod management {
 
 #[tokio::main]
 async fn main() {
-    // tui::tui_create();
+    // Create required folders and files when don't exists
+    create_stuff::create_stuff().expect("Couldn't create files and directories required to duly Database working!");
+
+    // CLI
     let add_user = Command::new("database TUI interface")
         .about("Create new database user")
         .subcommand(

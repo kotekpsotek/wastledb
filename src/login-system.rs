@@ -19,7 +19,7 @@ pub struct OneUser {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct FileDatas {
-    users: Vec<OneUser>
+    pub users: Vec<OneUser>
 }
 
 struct LoginSecurity;
