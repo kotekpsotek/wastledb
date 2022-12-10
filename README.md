@@ -84,3 +84,6 @@ My database offer support for all the most used SQL commands but I'm in op to co
         <td>❌</td>
     </tr>
 </table>
+
+## **License**:
+GNU GENERAL PUBLIC LICENSE v3
